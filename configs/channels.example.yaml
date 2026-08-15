@@ -1,0 +1,41 @@
+channels:
+  - name: srt-channel-1
+    source:
+      protocol: srt
+      uri: "srt://0.0.0.0:9000?mode=listener"
+    pipeline:
+      profile: ts_passthrough
+      segment_duration_sec: 3600
+    output:
+      container: mpegts
+      path_template: "recordings/{channel_id}/{session_id}/segment_%05d.ts"
+
+  - name: udp-channel-1
+    source:
+      protocol: udp
+      uri: "udp://0.0.0.0:5000"
+      config:
+        caps: "video/mpegts"
+    pipeline:
+      profile: ts_passthrough
+      segment_duration_sec: 1800
+    output:
+      container: mpegts
+
+  # Future transcode example (not active in Phase 1):
+  # - name: transcode-channel-1
+  #   source:
+  #     protocol: srt
+  #     uri: "srt://0.0.0.0:9001?mode=listener"
+  #   pipeline:
+  #     profile: transcode_remux
+  #     segment_duration_sec: 3600
+  #     video:
+  #       encoder: mainconcept:h264
+  #       framerate:
+  #         converter: insync
+  #         target: "25/1"
+  #     audio:
+  #       encoder: gstreamer:avenc_aac
+  #   output:
+  #     container: mxf
