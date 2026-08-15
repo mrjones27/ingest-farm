@@ -13,6 +13,22 @@ export function AssetDetailPage() {
   if (!asset) return <p className="text-slate-400">Loading…</p>;
 
   const playlist = asset.urls.proxy_playlist;
+  const segmentCount =
+    typeof asset.metadata.segment_count === "number" ? asset.metadata.segment_count : null;
+  const mediaError =
+    typeof asset.metadata.media_error === "string" ? asset.metadata.media_error : null;
+  const proxyStatus =
+    typeof asset.metadata.proxy === "string" ? asset.metadata.proxy : null;
+  let proxyMessage = "HLS proxy not available";
+  if (mediaError === "no_segments" || segmentCount === 0) {
+    proxyMessage = "No media segments captured — start recording with a live source, then stop";
+  } else if (mediaError === "master_not_a_file") {
+    proxyMessage = "Master file missing on disk — proxy cannot be generated";
+  } else if (proxyStatus === "failed") {
+    proxyMessage = "HLS proxy generation failed during post-process";
+  } else if (proxyStatus === "skipped") {
+    proxyMessage = "HLS proxy was skipped for this asset";
+  }
 
   return (
     <div className="space-y-6">
@@ -34,8 +50,8 @@ export function AssetDetailPage() {
           {playlist ? (
             <HlsPlayer src={playlist} />
           ) : (
-            <div className="flex aspect-video items-center justify-center text-sm text-slate-500">
-              HLS proxy not available
+            <div className="flex aspect-video items-center justify-center px-6 text-center text-sm text-slate-500">
+              {proxyMessage}
             </div>
           )}
         </div>

@@ -28,11 +28,79 @@ class PostProcessWorker:
         except Exception:
             logger.warning("GStreamer init failed — proxy/thumbnail may be unavailable")
         logger.info("Post-process worker started")
+        self._backfill_missing_media()
 
         while self._running:
             job = blocking_pop(POSTPROCESS_QUEUE, timeout=5)
             if job:
                 self._process(job)
+
+    def _derive_media(self, master_path: Path, derived_dir: Path) -> tuple[str | None, str | None, dict]:
+        """Generate HLS proxy + thumbnail from a master media file."""
+        metadata: dict = {}
+        proxy_path: str | None = None
+        thumbnail_path: str | None = None
+
+        if not master_path.is_file():
+            metadata["proxy"] = "skipped"
+            metadata["thumbnail"] = "skipped"
+            metadata["media_error"] = "master_not_a_file"
+            return None, None, metadata
+
+        try:
+            playlist = generate_hls_proxy(master_path, derived_dir / "proxy")
+            proxy_path = str(playlist)
+            metadata["proxy"] = "ok"
+        except Exception:
+            logger.exception("HLS proxy generation failed for %s", master_path)
+            metadata["proxy"] = "failed"
+
+        try:
+            thumb = generate_thumbnail(master_path, derived_dir / "thumb.jpg")
+            thumbnail_path = str(thumb)
+            metadata["thumbnail"] = "ok"
+        except Exception:
+            logger.exception("Thumbnail generation failed for %s", master_path)
+            metadata["thumbnail"] = "failed"
+
+        return proxy_path, thumbnail_path, metadata
+
+    def _backfill_missing_media(self) -> None:
+        """Fill proxy/thumbnail for cataloged assets that still have a master file."""
+        with get_session_factory()() as db:
+            assets = (
+                db.query(Asset)
+                .filter((Asset.proxy_path.is_(None)) | (Asset.thumbnail_path.is_(None)))
+                .all()
+            )
+            logger.info("Backfill: %s asset(s) missing proxy and/or thumbnail", len(assets))
+            for asset in assets:
+                master = Path(asset.master_path)
+                if not master.is_file():
+                    meta = dict(asset.metadata_json or {})
+                    meta.setdefault("proxy", "skipped")
+                    meta.setdefault("thumbnail", "skipped")
+                    meta["media_error"] = "master_not_a_file"
+                    asset.metadata_json = meta
+                    logger.info("Backfill skip asset %s — master is not a file", asset.id)
+                    continue
+
+                derived_dir = master.parent / "derived"
+                proxy_path, thumbnail_path, media_meta = self._derive_media(master, derived_dir)
+                meta = dict(asset.metadata_json or {})
+                meta.update(media_meta)
+                if proxy_path:
+                    asset.proxy_path = proxy_path
+                if thumbnail_path:
+                    asset.thumbnail_path = thumbnail_path
+                asset.metadata_json = meta
+                logger.info(
+                    "Backfill asset %s (proxy=%s thumb=%s)",
+                    asset.id,
+                    bool(proxy_path),
+                    bool(thumbnail_path),
+                )
+            db.commit()
 
     def _process(self, job: dict) -> None:
         recording_id = job["recording_id"]
@@ -49,34 +117,41 @@ class PostProcessWorker:
             channel = db.get(Channel, recording.channel_id)
             master_dir = Path(recording.storage_path)
             segments = self.storage.list_segments(master_dir)
-            master_path = segments[0] if segments else master_dir
-            master_path_str = str(master_path)
-
             metadata: dict = {"segment_count": len(segments)}
+
+            if not segments:
+                logger.warning(
+                    "Recording %s has no .ts segments — cataloging without proxy/thumbnail",
+                    recording_id,
+                )
+                metadata["proxy"] = "skipped"
+                metadata["thumbnail"] = "skipped"
+                metadata["media_error"] = "no_segments"
+                asset = Asset(
+                    recording_id=recording_id,
+                    title=(
+                        f"{channel.name if channel else recording.channel_id} — "
+                        f"{recording.started_at.isoformat()}"
+                    ),
+                    master_path=str(master_dir),
+                    proxy_path=None,
+                    thumbnail_path=None,
+                    metadata_json=metadata,
+                )
+                db.add(asset)
+                db.commit()
+                return
+
+            master_path = segments[0]
+            master_path_str = str(master_path)
             try:
                 metadata.update(discover_file(master_path_str))
             except Exception:
                 logger.warning("Could not discover metadata for %s", master_path_str)
 
-            proxy_path: str | None = None
-            thumbnail_path: str | None = None
             derived_dir = master_dir / "derived"
-
-            try:
-                playlist = generate_hls_proxy(Path(master_path_str), derived_dir / "proxy")
-                proxy_path = str(playlist)
-                metadata["proxy"] = "ok"
-            except Exception:
-                logger.exception("HLS proxy generation failed for %s", master_path_str)
-                metadata["proxy"] = "failed"
-
-            try:
-                thumb = generate_thumbnail(Path(master_path_str), derived_dir / "thumb.jpg")
-                thumbnail_path = str(thumb)
-                metadata["thumbnail"] = "ok"
-            except Exception:
-                logger.exception("Thumbnail generation failed for %s", master_path_str)
-                metadata["thumbnail"] = "failed"
+            proxy_path, thumbnail_path, media_meta = self._derive_media(master_path, derived_dir)
+            metadata.update(media_meta)
 
             asset = Asset(
                 recording_id=recording_id,
