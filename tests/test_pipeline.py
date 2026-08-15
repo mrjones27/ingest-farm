@@ -55,5 +55,21 @@ def test_builder_supports_passthrough_sources() -> None:
     assert "srt" in builder.supported_protocols()
     assert "udp" in builder.supported_protocols()
     assert "file" in builder.supported_protocols()
+    assert "rtmp" in builder.supported_protocols()
+    assert "hls" in builder.supported_protocols()
     assert "ts_passthrough" in builder.supported_profiles()
     assert "transcode_remux" not in builder.supported_profiles()
+
+
+def test_udp_rtp_transport_config_accepted() -> None:
+    config = ChannelConfig.model_validate(
+        {
+            "name": "rtp-1",
+            "source": {
+                "protocol": "udp",
+                "uri": "udp://0.0.0.0:5004",
+                "config": {"transport": "rtp-h264"},
+            },
+        }
+    )
+    assert config.source.config["transport"] == "rtp-h264"

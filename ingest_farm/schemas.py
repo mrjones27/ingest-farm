@@ -99,6 +99,7 @@ class AssetResponse(BaseModel):
     thumbnail_path: str | None
     metadata: dict[str, Any]
     created_at: datetime
+    urls: dict[str, str | None] = Field(default_factory=dict)
 
     model_config = {"from_attributes": True}
 

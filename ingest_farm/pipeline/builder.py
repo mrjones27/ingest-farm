@@ -12,12 +12,20 @@ class PipelineBuilder:
     def __init__(self) -> None:
         from ingest_farm.pipeline.stages.output.ts_capture import TsCaptureStage
         from ingest_farm.pipeline.stages.processing.passthrough import PassthroughStage
-        from ingest_farm.pipeline.stages.source import FileSourceStage, SrtSourceStage, UdpSourceStage
+        from ingest_farm.pipeline.stages.source import (
+            FileSourceStage,
+            HlsSourceStage,
+            RtmpSourceStage,
+            SrtSourceStage,
+            UdpSourceStage,
+        )
 
         self._sources: dict[SourceProtocol, SourceStage] = {
             SourceProtocol.SRT: SrtSourceStage(),
             SourceProtocol.UDP: UdpSourceStage(),
             SourceProtocol.FILE: FileSourceStage(),
+            SourceProtocol.RTMP: RtmpSourceStage(),
+            SourceProtocol.HLS: HlsSourceStage(),
         }
         self._processing: dict[PipelineProfile, ProcessingStage] = {
             PipelineProfile.TS_PASSTHROUGH: PassthroughStage(),

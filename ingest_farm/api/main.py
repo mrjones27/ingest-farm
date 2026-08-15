@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ingest_farm.common.events import get_redis
 from ingest_farm.db import get_db, get_engine
-from ingest_farm.models import Asset, Channel, Worker
+from ingest_farm.models import Asset, Channel, Recording, Worker
 from ingest_farm.orchestrator.scheduler import Scheduler
 from ingest_farm.pipeline.encoders.registry import default_registry
 from ingest_farm.schemas import (
@@ -48,6 +52,45 @@ def _channel_response(channel: Channel) -> ChannelResponse:
     )
 
 
+def _asset_urls(asset: Asset) -> dict[str, str | None]:
+    base = f"/assets/{asset.id}"
+    return {
+        "detail": base,
+        "master": f"{base}/master" if asset.master_path else None,
+        "thumbnail": f"{base}/thumbnail" if asset.thumbnail_path else None,
+        "proxy_playlist": f"{base}/proxy/playlist.m3u8" if asset.proxy_path else None,
+    }
+
+
+def _asset_response(asset: Asset) -> AssetResponse:
+    return AssetResponse(
+        id=asset.id,
+        recording_id=asset.recording_id,
+        title=asset.title,
+        duration_ms=asset.duration_ms,
+        width=asset.width,
+        height=asset.height,
+        video_codec=asset.video_codec,
+        audio_codec=asset.audio_codec,
+        master_path=asset.master_path,
+        proxy_path=asset.proxy_path,
+        thumbnail_path=asset.thumbnail_path,
+        metadata=asset.metadata_json or {},
+        created_at=asset.created_at,
+        urls=_asset_urls(asset),
+    )
+
+
+def _safe_under(root: Path, candidate: Path) -> Path:
+    root = root.resolve()
+    target = candidate.resolve()
+    if root not in target.parents and target != root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return target
+
+
 @router.get("/health")
 def health() -> dict:
     checks: dict[str, str] = {"api": "ok"}
@@ -58,7 +101,7 @@ def health() -> dict:
     except Exception as exc:
         checks["database"] = f"error: {exc}"
     try:
-        if get_redis().ping():
+        if get_redis(socket_timeout=2).ping():
             checks["redis"] = "ok"
         else:
             checks["redis"] = "error: ping failed"
@@ -129,7 +172,10 @@ def stop_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelRespo
     channel = db.get(Channel, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
-    scheduler.stop_channel(db, channel_id)
+    try:
+        scheduler.stop_channel(db, channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.refresh(channel)
     return _channel_response(channel)
 
@@ -137,30 +183,24 @@ def stop_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelRespo
 @router.get("/assets", response_model=list[AssetResponse])
 def list_assets(
     q: str | None = Query(default=None),
+    channel_id: str | None = Query(default=None),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
 ) -> list[AssetResponse]:
     query = db.query(Asset).order_by(Asset.created_at.desc())
     if q:
         query = query.filter(Asset.title.ilike(f"%{q}%"))
-    assets = query.limit(100).all()
-    return [
-        AssetResponse(
-            id=a.id,
-            recording_id=a.recording_id,
-            title=a.title,
-            duration_ms=a.duration_ms,
-            width=a.width,
-            height=a.height,
-            video_codec=a.video_codec,
-            audio_codec=a.audio_codec,
-            master_path=a.master_path,
-            proxy_path=a.proxy_path,
-            thumbnail_path=a.thumbnail_path,
-            metadata=a.metadata_json,
-            created_at=a.created_at,
+    if channel_id:
+        query = query.join(Recording, Recording.id == Asset.recording_id).filter(
+            Recording.channel_id == channel_id
         )
-        for a in assets
-    ]
+    if created_after:
+        query = query.filter(Asset.created_at >= created_after)
+    if created_before:
+        query = query.filter(Asset.created_at <= created_before)
+    return [_asset_response(a) for a in query.limit(limit).all()]
 
 
 @router.get("/assets/search", response_model=list[AssetResponse])
@@ -176,21 +216,55 @@ def get_asset(asset_id: str, db: Session = Depends(get_db)) -> AssetResponse:
     asset = db.get(Asset, asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
-    return AssetResponse(
-        id=asset.id,
-        recording_id=asset.recording_id,
-        title=asset.title,
-        duration_ms=asset.duration_ms,
-        width=asset.width,
-        height=asset.height,
-        video_codec=asset.video_codec,
-        audio_codec=asset.audio_codec,
-        master_path=asset.master_path,
-        proxy_path=asset.proxy_path,
-        thumbnail_path=asset.thumbnail_path,
-        metadata=asset.metadata_json,
-        created_at=asset.created_at,
-    )
+    return _asset_response(asset)
+
+
+@router.get("/assets/{asset_id}/master")
+def download_master(asset_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    asset = db.get(Asset, asset_id)
+    if asset is None or not asset.master_path:
+        raise HTTPException(status_code=404, detail="Master not found")
+    path = Path(asset.master_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Master file missing on disk")
+    return FileResponse(path, media_type="video/mp2t", filename=path.name)
+
+
+@router.get("/assets/{asset_id}/thumbnail")
+def get_thumbnail(asset_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    asset = db.get(Asset, asset_id)
+    if asset is None or not asset.thumbnail_path:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    path = Path(asset.thumbnail_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Thumbnail file missing on disk")
+    return FileResponse(path, media_type="image/jpeg", filename=path.name)
+
+
+@router.get("/assets/{asset_id}/proxy/{file_path:path}")
+def get_proxy_file(asset_id: str, file_path: str, db: Session = Depends(get_db)) -> Response:
+    asset = db.get(Asset, asset_id)
+    if asset is None or not asset.proxy_path:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+
+    proxy_root = Path(asset.proxy_path).parent
+    target = _safe_under(proxy_root, proxy_root / file_path)
+
+    if target.suffix == ".m3u8":
+        text_body = target.read_text(encoding="utf-8")
+        rewritten = []
+        for line in text_body.splitlines():
+            if line and not line.startswith("#") and not line.startswith("http"):
+                rewritten.append(f"/assets/{asset_id}/proxy/{line.strip()}")
+            else:
+                rewritten.append(line)
+        return PlainTextResponse(
+            "\n".join(rewritten) + "\n",
+            media_type="application/vnd.apple.mpegurl",
+        )
+
+    media = "video/mp2t" if target.suffix == ".ts" else "application/octet-stream"
+    return FileResponse(target, media_type=media, filename=target.name)
 
 
 @router.get("/workers", response_model=list[WorkerResponse])

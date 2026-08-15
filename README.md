@@ -6,7 +6,7 @@ Modular GStreamer broadcast ingest recording farm and MAM platform.
 
 Ingest pipelines are composed from three swappable stages:
 
-1. **SourceStage** — SRT, UDP, file (RTMP/HLS later)
+1. **SourceStage** — SRT, UDP/RTP, RTMP, HLS, file
 2. **ProcessingStage** — passthrough (Phase 1), demux/encode (future)
 3. **OutputStage** — MPEG-TS capture via `tsparse` + `multifilesink` (Phase 1)
 
@@ -50,8 +50,6 @@ open http://localhost:8080/docs
 
 ## Capture smoke test (pipeline only)
 
-No control plane required — exercises GStreamer passthrough directly:
-
 ```bash
 docker compose --profile gst run --rm gst python scripts/capture_test.py --mode file
 docker compose --profile gst run --rm gst python scripts/capture_test.py --mode udp --duration 8
@@ -70,7 +68,7 @@ cp .env.example .env
 
 python scripts/run_api.py
 python scripts/run_worker.py       # needs GStreamer
-python scripts/run_postprocess.py  # needs GStreamer for discoverer
+python scripts/run_postprocess.py  # needs GStreamer for proxy/thumbnail
 ```
 
 ## Create a channel and start recording
@@ -98,11 +96,17 @@ curl -s -X POST http://localhost:8080/channels \
 curl -X POST http://localhost:8080/channels/{id}/start
 curl -X POST http://localhost:8080/channels/{id}/stop
 
-# Browse assets / workers
+# Browse assets / workers / media
 curl http://localhost:8080/assets
+curl "http://localhost:8080/assets?channel_id={id}"
+curl http://localhost:8080/assets/{asset_id}
+curl http://localhost:8080/assets/{asset_id}/thumbnail
+curl http://localhost:8080/assets/{asset_id}/proxy/playlist.m3u8
 curl http://localhost:8080/workers
 curl http://localhost:8080/health
 ```
+
+Supported ingest protocols: `srt`, `udp` (mpegts / `rtp-h264` / `rtp-mp2t`), `rtmp`, `hls`, `file`.
 
 ## Project layout
 
@@ -111,15 +115,15 @@ ingest_farm/
   pipeline/
     builder.py              # Composes stages from channel profile
     stages/
-      source/               # SRT, UDP, file
+      source/               # SRT, UDP/RTP, RTMP, HLS, file
       processing/           # Passthrough (Phase 1)
       output/               # TS capture
     encoders/
       registry.py           # Swappable encoder plugins
   worker/                   # GStreamer recorder
   orchestrator/             # Redis job scheduler
-  postprocess/              # Asset catalog + proxy (stub)
-  api/                      # FastAPI control plane
+  postprocess/              # HLS proxy + thumbnail + catalog
+  api/                      # FastAPI control plane + media serving
 scripts/
   capture_test.py           # Pipeline-only smoke test
   control_plane_test.py     # API → worker → asset E2E test
@@ -129,6 +133,6 @@ scripts/
 
 - [ ] `transcode_remux` profile — demux, encoder registry, remux (MKV/MXF)
 - [ ] External SDK adapters — MainConcept, Insync
-- [ ] HLS proxy + thumbnail generation in post-process
-- [ ] RTMP, HLS pull source stages
+- [ ] Audio track in HLS proxy
 - [ ] SRT control-plane E2E
+- [ ] Archive tiers / approval workflow
