@@ -13,7 +13,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ingest -d ingest_farm"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -23,7 +23,7 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
 
   minio:
     image: minio/minio:latest
@@ -39,12 +39,89 @@ services:
     profiles:
       - s3
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.gst
+    command: ["python", "scripts/run_api.py"]
+    environment: &app-env
+      DATABASE_URL: postgresql+psycopg://ingest:ingest@postgres:5432/ingest_farm
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_ROOT: /data/recordings
+      API_HOST: 0.0.0.0
+      API_PORT: "8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      - ./ingest_farm:/app/ingest_farm
+      - ./scripts:/app/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.gst
+    command: ["python", "scripts/run_worker.py"]
+    environment:
+      <<: *app-env
+      WORKER_ID: worker-1
+      WORKER_CAPACITY: "4"
+    volumes:
+      - ./data:/data
+      - ./ingest_farm:/app/ingest_farm
+      - ./scripts:/app/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  postprocess:
+    build:
+      context: .
+      dockerfile: Dockerfile.gst
+    command: ["python", "scripts/run_postprocess.py"]
+    environment:
+      <<: *app-env
+    volumes:
+      - ./data:/data
+      - ./ingest_farm:/app/ingest_farm
+      - ./scripts:/app/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
   gst:
     build:
       context: .
       dockerfile: Dockerfile.gst
     profiles:
       - gst
+    environment:
+      <<: *app-env
     volumes:
       - ./data:/data
       - ./ingest_farm:/app/ingest_farm

@@ -35,41 +35,42 @@ sudo apt install \
 
 Use WSL2 Ubuntu with the packages above. Native Windows GStreamer builds exist but Linux is the production target.
 
-## Capture smoke test (Docker + GStreamer)
-
-No native GStreamer on Windows required — runs inside a Ubuntu image:
+## Quick start (Docker control plane)
 
 ```bash
-# File-source passthrough (generate sample TS → capture segments)
-docker compose --profile gst run --rm gst python scripts/capture_test.py --mode file
+# API + worker + post-process + Postgres + Redis
+docker compose up -d --build
 
-# Live UDP pattern → capture
+# End-to-end: API start → UDP capture → stop → MAM asset
+docker compose --profile gst run --rm gst python scripts/control_plane_test.py
+
+# OpenAPI docs
+open http://localhost:8080/docs
+```
+
+## Capture smoke test (pipeline only)
+
+No control plane required — exercises GStreamer passthrough directly:
+
+```bash
+docker compose --profile gst run --rm gst python scripts/capture_test.py --mode file
 docker compose --profile gst run --rm gst python scripts/capture_test.py --mode udp --duration 8
 ```
 
 Segments land under `data/capture-test/{file,udp}/`.
 
-## Quick start
+## Local Python (optional)
 
 ```bash
-# Infrastructure
-docker compose up -d
-
-# Python env
+docker compose up -d postgres redis
 python -m venv .venv
 source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -e .
-
 cp .env.example .env
 
-# API
 python scripts/run_api.py
-
-# Worker (separate terminal)
-python scripts/run_worker.py
-
-# Post-process (separate terminal)
-python scripts/run_postprocess.py
+python scripts/run_worker.py       # needs GStreamer
+python scripts/run_postprocess.py  # needs GStreamer for discoverer
 ```
 
 ## Create a channel and start recording
@@ -78,14 +79,15 @@ python scripts/run_postprocess.py
 curl -s -X POST http://localhost:8080/channels \
   -H 'Content-Type: application/json' \
   -d '{
-    "name": "srt-test",
+    "name": "udp-live",
     "source": {
-      "protocol": "file",
-      "uri": "/path/to/sample.ts"
+      "protocol": "udp",
+      "uri": "udp://0.0.0.0:5000",
+      "config": {"caps": "video/mpegts"}
     },
     "pipeline": {
       "profile": "ts_passthrough",
-      "segment_duration_sec": 60
+      "segment_duration_sec": 3600
     },
     "output": {
       "container": "mpegts"
@@ -96,8 +98,10 @@ curl -s -X POST http://localhost:8080/channels \
 curl -X POST http://localhost:8080/channels/{id}/start
 curl -X POST http://localhost:8080/channels/{id}/stop
 
-# Browse assets
+# Browse assets / workers
 curl http://localhost:8080/assets
+curl http://localhost:8080/workers
+curl http://localhost:8080/health
 ```
 
 ## Project layout
@@ -116,6 +120,9 @@ ingest_farm/
   orchestrator/             # Redis job scheduler
   postprocess/              # Asset catalog + proxy (stub)
   api/                      # FastAPI control plane
+scripts/
+  capture_test.py           # Pipeline-only smoke test
+  control_plane_test.py     # API → worker → asset E2E test
 ```
 
 ## Roadmap
@@ -124,3 +131,4 @@ ingest_farm/
 - [ ] External SDK adapters — MainConcept, Insync
 - [ ] HLS proxy + thumbnail generation in post-process
 - [ ] RTMP, HLS pull source stages
+- [ ] SRT control-plane E2E

@@ -16,10 +16,13 @@ class Scheduler:
         channel = db.get(Channel, channel_id)
         if channel is None:
             raise ValueError(f"Channel {channel_id} not found")
-        if channel.status == "recording":
-            raise ValueError(f"Channel {channel_id} is already recording")
+        if channel.status in {"recording", "starting", "stopping"}:
+            raise ValueError(f"Channel {channel_id} is already {channel.status}")
 
         worker = self._pick_worker(db)
+        if worker is None:
+            logger.warning("No workers registered yet; queueing start for %s anyway", channel_id)
+
         publish_event(
             CHANNEL_START_QUEUE,
             {"channel_id": channel_id, "worker_hint": worker.hostname if worker else None},
@@ -32,6 +35,8 @@ class Scheduler:
         channel = db.get(Channel, channel_id)
         if channel is None:
             raise ValueError(f"Channel {channel_id} not found")
+        if channel.status not in {"recording", "starting"}:
+            raise ValueError(f"Channel {channel_id} is not active (status={channel.status})")
 
         publish_event(CHANNEL_STOP_QUEUE, {"channel_id": channel_id})
         channel.status = "stopping"

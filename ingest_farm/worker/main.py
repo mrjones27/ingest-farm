@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import signal
-import time
 from datetime import datetime, timezone
 
 from ingest_farm.common.events import (
@@ -48,13 +47,15 @@ class IngestWorker:
 
         while self._running:
             self._heartbeat()
-            job = blocking_pop(CHANNEL_START_QUEUE, timeout=2)
+            # Prefer draining stop requests so channels can end promptly.
+            stop_job = try_pop(CHANNEL_STOP_QUEUE)
+            while stop_job:
+                self._handle_stop(stop_job)
+                stop_job = try_pop(CHANNEL_STOP_QUEUE)
+
+            job = blocking_pop(CHANNEL_START_QUEUE, timeout=1)
             if job:
                 self._handle_start(job)
-            stop_job = try_pop(CHANNEL_STOP_QUEUE)
-            if stop_job:
-                self._handle_stop(stop_job)
-            time.sleep(0.1)
 
     def _register_worker(self) -> None:
         with get_session_factory()() as db:
@@ -81,6 +82,11 @@ class IngestWorker:
             return
         if len(self._recorders) >= self.settings.worker_capacity:
             logger.warning("Worker at capacity, rejecting channel %s", channel_id)
+            with get_session_factory()() as db:
+                ch = db.get(Channel, channel_id)
+                if ch and ch.status == "starting":
+                    ch.status = "error"
+                    db.commit()
             return
 
         with get_session_factory()() as db:

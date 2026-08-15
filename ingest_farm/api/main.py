@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ingest_farm.db import get_db
+from ingest_farm.common.events import get_redis
+from ingest_farm.db import get_db, get_engine
 from ingest_farm.models import Asset, Channel, Worker
 from ingest_farm.orchestrator.scheduler import Scheduler
+from ingest_farm.pipeline.encoders.registry import default_registry
 from ingest_farm.schemas import (
     AssetResponse,
     ChannelCreate,
@@ -15,7 +18,6 @@ from ingest_farm.schemas import (
     SourceConfig,
     WorkerResponse,
 )
-from ingest_farm.pipeline.encoders.registry import default_registry
 
 router = APIRouter()
 scheduler = Scheduler()
@@ -48,7 +50,23 @@ def _channel_response(channel: Channel) -> ChannelResponse:
 
 @router.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    checks: dict[str, str] = {"api": "ok"}
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+    try:
+        if get_redis().ping():
+            checks["redis"] = "ok"
+        else:
+            checks["redis"] = "error: ping failed"
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    status = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    return {"status": status, "checks": checks}
 
 
 @router.get("/encoders")

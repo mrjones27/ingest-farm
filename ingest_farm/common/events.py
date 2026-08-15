@@ -14,7 +14,13 @@ POSTPROCESS_QUEUE = "ingest:jobs:postprocess"
 
 
 def get_redis() -> redis.Redis:
-    return redis.from_url(get_settings().redis_url, decode_responses=True)
+    # socket_timeout must be None (or > BRPOP timeout) or blocking pops raise TimeoutError.
+    return redis.from_url(
+        get_settings().redis_url,
+        decode_responses=True,
+        socket_timeout=None,
+        socket_connect_timeout=5,
+    )
 
 
 def publish_event(queue: str, payload: dict[str, Any]) -> None:
@@ -23,7 +29,10 @@ def publish_event(queue: str, payload: dict[str, Any]) -> None:
 
 def blocking_pop(queue: str, timeout: int = 5) -> dict[str, Any] | None:
     client = get_redis()
-    result = client.brpop(queue, timeout=timeout)
+    try:
+        result = client.brpop(queue, timeout=timeout)
+    except redis.TimeoutError:
+        return None
     if result is None:
         return None
     _, raw = result

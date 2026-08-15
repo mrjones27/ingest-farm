@@ -37,7 +37,10 @@ def client() -> Generator[TestClient, None, None]:
 def test_health(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    body = response.json()
+    assert body["status"] in {"ok", "degraded"}
+    assert "checks" in body
+    assert body["checks"]["api"] == "ok"
 
 
 def test_list_encoders(client: TestClient) -> None:
