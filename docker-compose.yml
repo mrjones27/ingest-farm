@@ -90,10 +90,13 @@ services:
       context: .
       dockerfile: Dockerfile.gst
     command: ["python", "scripts/run_worker.py"]
+    restart: unless-stopped
     environment:
       <<: *app-env
       WORKER_ID: worker-1
       WORKER_CAPACITY: "4"
+    ports:
+      - "5100:5100/udp"
     volumes:
       - ./data:/data
       - ./ingest_farm:/app/ingest_farm

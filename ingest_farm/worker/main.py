@@ -44,6 +44,7 @@ class IngestWorker:
         signal.signal(signal.SIGTERM, self._shutdown)
         logger.info("Worker %s starting (capacity=%s)", self.worker_id, self.settings.worker_capacity)
         self._register_worker()
+        self._reconcile_orphaned_channels()
 
         while self._running:
             self._heartbeat()
@@ -66,6 +67,34 @@ class IngestWorker:
             worker.last_heartbeat = datetime.now(timezone.utc)
             worker.active_channels = list(self._recorders.keys())
             db.commit()
+
+    def _reconcile_orphaned_channels(self) -> None:
+        """Clear channels left in starting/recording/stopping after a worker crash."""
+        with get_session_factory()() as db:
+            orphans = (
+                db.query(Channel)
+                .filter(Channel.status.in_(("starting", "recording", "stopping")))
+                .all()
+            )
+            cleared: list[str] = []
+            for channel in orphans:
+                if channel.id in self._recorders:
+                    continue
+                old = channel.status
+                channel.status = "idle"
+                cleared.append(f"{channel.name}:{old}")
+                recording = (
+                    db.query(Recording)
+                    .filter_by(channel_id=channel.id, status=RecordingStatus.RECORDING.value)
+                    .order_by(Recording.started_at.desc())
+                    .first()
+                )
+                if recording:
+                    recording.status = RecordingStatus.FAILED.value
+                    recording.ended_at = datetime.now(timezone.utc)
+            if cleared:
+                db.commit()
+                logger.warning("Reconciled orphaned channels → idle: %s", cleared)
 
     def _heartbeat(self) -> None:
         with get_session_factory()() as db:
@@ -129,6 +158,24 @@ class IngestWorker:
         channel_id = job["channel_id"]
         recorder = self._recorders.pop(channel_id, None)
         if recorder is None:
+            # Worker crash / orphaned stop job — still clear sticky "stopping".
+            with get_session_factory()() as db:
+                channel = db.get(Channel, channel_id)
+                if channel and channel.status in {"stopping", "starting", "recording"}:
+                    channel.status = "idle"
+                    recording = (
+                        db.query(Recording)
+                        .filter_by(channel_id=channel_id, status=RecordingStatus.RECORDING.value)
+                        .order_by(Recording.started_at.desc())
+                        .first()
+                    )
+                    if recording:
+                        recording.status = RecordingStatus.FAILED.value
+                        recording.ended_at = datetime.now(timezone.utc)
+                    db.commit()
+                    logger.warning(
+                        "Cleared orphaned channel %s → idle (no local recorder)", channel_id
+                    )
             return
 
         recorder.stop()
@@ -160,6 +207,8 @@ class IngestWorker:
                     POSTPROCESS_QUEUE,
                     {"recording_id": recording.id, "channel_id": channel_id},
                 )
+            else:
+                db.commit()
 
     def _channel_to_config(self, channel: Channel) -> ChannelConfig:
         profile = channel.pipeline_profile or {}

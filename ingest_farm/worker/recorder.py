@@ -25,6 +25,8 @@ class PipelineRecorder:
         self._session_id = new_id()
         self._output_dir: Path | None = None
         self._segment_count = 0
+        self._stopping = False
+        self._channel_name = ""
 
     @property
     def session_id(self) -> str:
@@ -48,7 +50,9 @@ class PipelineRecorder:
         if self._pipeline is not None:
             raise RuntimeError("Recorder already running")
 
+        self._channel_name = config.name
         self._output_dir = output_dir
+        self._stopping = False
         ctx: dict[str, Any] = {"output_dir": output_dir}
         self._pipeline = self._builder.compose(config, ctx)
 
@@ -61,12 +65,18 @@ class PipelineRecorder:
             raise RuntimeError("Failed to start GStreamer pipeline")
 
         self._loop = GLib.MainLoop()
-        self._thread = threading.Thread(target=self._loop.run, daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop.run, daemon=True, name=f"gst-{config.name}"
+        )
         self._thread.start()
         logger.info("Pipeline started for channel %s → %s", config.name, output_dir)
 
     def stop(self) -> None:
         from gi.repository import Gst
+
+        if self._stopping:
+            return
+        self._stopping = True
 
         if self._pipeline is None:
             return
@@ -74,6 +84,7 @@ class PipelineRecorder:
         pipeline = self._pipeline
         loop = self._loop
         thread = self._thread
+        same_thread = thread is not None and thread is threading.current_thread()
 
         # Clear first so concurrent stop/EOS calls are no-ops.
         self._pipeline = None
@@ -85,7 +96,7 @@ class PipelineRecorder:
             loop.quit()
 
         # Bus callbacks run on the GLib thread — never join ourselves.
-        if thread is not None and thread is not threading.current_thread():
+        if thread is not None and not same_thread:
             thread.join(timeout=10)
 
         if self._output_dir is not None:
@@ -93,13 +104,26 @@ class PipelineRecorder:
 
         logger.info("Pipeline stopped")
 
+    def _request_stop_from_bus(self, reason: str) -> None:
+        """Schedule stop on the GLib idle queue — never tear down mid bus-handler."""
+        from gi.repository import GLib
+
+        def _idle_stop() -> bool:
+            try:
+                self.stop()
+            except Exception:
+                logger.exception("Deferred pipeline stop failed (%s)", reason)
+            return False
+
+        GLib.idle_add(_idle_stop)
+
     def _on_bus_message(self, bus: Any, message: Any) -> None:
         from gi.repository import Gst
 
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
             logger.error("Pipeline error: %s (%s)", err, debug)
-            self.stop()
+            self._request_stop_from_bus("error")
         elif message.type == Gst.MessageType.EOS:
             logger.info("Pipeline EOS")
-            self.stop()
+            self._request_stop_from_bus("eos")

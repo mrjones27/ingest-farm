@@ -35,7 +35,7 @@ class Scheduler:
         channel = db.get(Channel, channel_id)
         if channel is None:
             raise ValueError(f"Channel {channel_id} not found")
-        if channel.status not in {"recording", "starting"}:
+        if channel.status not in {"recording", "starting", "stopping"}:
             raise ValueError(f"Channel {channel_id} is not active (status={channel.status})")
 
         publish_event(CHANNEL_STOP_QUEUE, {"channel_id": channel_id})
