@@ -44,7 +44,7 @@ def test_health(client: TestClient) -> None:
 
 
 def test_list_encoders(client: TestClient) -> None:
-    response = client.get("/encoders")
+    response = client.get("/api/encoders")
     assert response.status_code == 200
     body = response.json()
     assert "gstreamer:x264enc" in body["video_audio_encoders"]
@@ -58,13 +58,34 @@ def test_create_and_list_channel(client: TestClient) -> None:
         "pipeline": {"profile": "ts_passthrough", "segment_duration_sec": 3600},
         "output": {"container": "mpegts"},
     }
-    created = client.post("/channels", json=payload)
+    created = client.post("/api/channels", json=payload)
     assert created.status_code == 200
     body = created.json()
     assert body["name"] == "srt-test"
     assert body["pipeline"]["profile"] == "ts_passthrough"
     assert body["status"] == "idle"
 
-    listed = client.get("/channels")
+    listed = client.get("/api/channels")
     assert listed.status_code == 200
     assert len(listed.json()) == 1
+
+
+def test_spa_does_not_shadow_api(client: TestClient) -> None:
+    from ingest_farm.api.main import WEB_DIST
+
+    listed = client.get("/api/channels")
+    assert listed.status_code == 200
+    assert listed.headers["content-type"].startswith("application/json")
+
+    docs = client.get("/docs")
+    assert docs.status_code == 200
+
+    if (WEB_DIST / "index.html").is_file():
+        spa = client.get("/assets")
+        assert spa.status_code == 200
+        assert "text/html" in spa.headers["content-type"]
+        root = client.get("/")
+        assert root.status_code == 200
+        assert "text/html" in root.headers["content-type"]
+    else:
+        assert client.get("/").status_code == 404

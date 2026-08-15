@@ -5,9 +5,12 @@ __pycache__/
 venv/
 .env
 data/
-*.ts
 *.mkv
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
 alembic/versions/*.pyc
+
+# Frontend
+web/node_modules/
+web/dist/

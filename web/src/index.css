@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  background: #0b0d10;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply btn bg-sky-600 text-white hover:bg-sky-500;
+  }
+  .btn-ghost {
+    @apply btn border border-ink-600 bg-ink-800 text-slate-200 hover:border-slate-500 hover:bg-ink-700;
+  }
+  .btn-danger {
+    @apply btn bg-red-700 text-white hover:bg-red-600;
+  }
+  .btn-live {
+    @apply btn bg-emerald-700 text-white hover:bg-emerald-600;
+  }
+  .panel {
+    @apply rounded-lg border border-ink-600 bg-ink-800;
+  }
+  .field {
+    @apply w-full rounded-md border border-ink-600 bg-ink-900 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-sky-500;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400;
+  }
+}

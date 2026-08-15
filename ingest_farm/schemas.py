@@ -88,6 +88,8 @@ class RecordingResponse(BaseModel):
 class AssetResponse(BaseModel):
     id: str
     recording_id: str
+    channel_id: str
+    channel_name: str
     title: str
     duration_ms: int | None
     width: int | None

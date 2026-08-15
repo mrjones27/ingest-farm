@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, contains_eager, joinedload
 
 from ingest_farm.common.events import get_redis
 from ingest_farm.db import get_db, get_engine
@@ -23,14 +23,41 @@ from ingest_farm.schemas import (
     WorkerResponse,
 )
 
+health_router = APIRouter()
 router = APIRouter()
 scheduler = Scheduler()
+
+WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Ingest Farm", version="0.1.0")
-    app.include_router(router)
+    app.include_router(health_router)
+    app.include_router(router, prefix="/api")
+    _mount_spa(app)
     return app
+
+
+def _mount_spa(app: FastAPI) -> None:
+    index = WEB_DIST / "index.html"
+    if not index.is_file():
+        return
+
+    def _spa_file(full_path: str) -> FileResponse:
+        dist_root = WEB_DIST.resolve()
+        if full_path:
+            candidate = (WEB_DIST / full_path).resolve()
+            if dist_root in candidate.parents and candidate.is_file():
+                return FileResponse(candidate)
+        return FileResponse(index)
+
+    @app.get("/")
+    def spa_root() -> FileResponse:
+        return FileResponse(index)
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str) -> FileResponse:
+        return _spa_file(full_path)
 
 
 def _channel_response(channel: Channel) -> ChannelResponse:
@@ -53,7 +80,7 @@ def _channel_response(channel: Channel) -> ChannelResponse:
 
 
 def _asset_urls(asset: Asset) -> dict[str, str | None]:
-    base = f"/assets/{asset.id}"
+    base = f"/api/assets/{asset.id}"
     return {
         "detail": base,
         "master": f"{base}/master" if asset.master_path else None,
@@ -63,9 +90,13 @@ def _asset_urls(asset: Asset) -> dict[str, str | None]:
 
 
 def _asset_response(asset: Asset) -> AssetResponse:
+    recording = asset.recording
+    channel = recording.channel if recording is not None else None
     return AssetResponse(
         id=asset.id,
         recording_id=asset.recording_id,
+        channel_id=recording.channel_id if recording is not None else "",
+        channel_name=channel.name if channel is not None else "",
         title=asset.title,
         duration_ms=asset.duration_ms,
         width=asset.width,
@@ -91,7 +122,7 @@ def _safe_under(root: Path, candidate: Path) -> Path:
     return target
 
 
-@router.get("/health")
+@health_router.get("/health")
 def health() -> dict:
     checks: dict[str, str] = {"api": "ok"}
     try:
@@ -189,13 +220,17 @@ def list_assets(
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
 ) -> list[AssetResponse]:
-    query = db.query(Asset).order_by(Asset.created_at.desc())
+    query = (
+        db.query(Asset)
+        .join(Asset.recording)
+        .join(Recording.channel)
+        .options(contains_eager(Asset.recording).contains_eager(Recording.channel))
+        .order_by(Asset.created_at.desc())
+    )
     if q:
         query = query.filter(Asset.title.ilike(f"%{q}%"))
     if channel_id:
-        query = query.join(Recording, Recording.id == Asset.recording_id).filter(
-            Recording.channel_id == channel_id
-        )
+        query = query.filter(Recording.channel_id == channel_id)
     if created_after:
         query = query.filter(Asset.created_at >= created_after)
     if created_before:
@@ -213,7 +248,12 @@ def search_assets(
 
 @router.get("/assets/{asset_id}", response_model=AssetResponse)
 def get_asset(asset_id: str, db: Session = Depends(get_db)) -> AssetResponse:
-    asset = db.get(Asset, asset_id)
+    asset = (
+        db.query(Asset)
+        .options(joinedload(Asset.recording).joinedload(Recording.channel))
+        .filter(Asset.id == asset_id)
+        .one_or_none()
+    )
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
     return _asset_response(asset)
@@ -255,7 +295,7 @@ def get_proxy_file(asset_id: str, file_path: str, db: Session = Depends(get_db))
         rewritten = []
         for line in text_body.splitlines():
             if line and not line.startswith("#") and not line.startswith("http"):
-                rewritten.append(f"/assets/{asset_id}/proxy/{line.strip()}")
+                rewritten.append(f"/api/assets/{asset_id}/proxy/{line.strip()}")
             else:
                 rewritten.append(line)
         return PlainTextResponse(

@@ -38,15 +38,28 @@ Use WSL2 Ubuntu with the packages above. Native Windows GStreamer builds exist b
 ## Quick start (Docker control plane)
 
 ```bash
-# API + worker + post-process + Postgres + Redis
+# API + worker + post-process + Postgres + Redis + web UI
 docker compose up -d --build
 
 # End-to-end: API start → UDP capture → stop → MAM asset
 docker compose --profile gst run --rm gst python scripts/control_plane_test.py
 
+# Ops console (served by the API)
+open http://localhost:8080/
+
 # OpenAPI docs
 open http://localhost:8080/docs
 ```
+
+Hot-reload UI against a running API:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Vite proxies `/api` and `/health` to `http://localhost:8080`.
 
 ## Capture smoke test (pipeline only)
 
@@ -69,12 +82,15 @@ cp .env.example .env
 python scripts/run_api.py
 python scripts/run_worker.py       # needs GStreamer
 python scripts/run_postprocess.py  # needs GStreamer for proxy/thumbnail
+
+# Ops console with hot reload (separate terminal)
+cd web && npm install && npm run dev
 ```
 
 ## Create a channel and start recording
 
 ```bash
-curl -s -X POST http://localhost:8080/channels \
+curl -s -X POST http://localhost:8080/api/channels \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "udp-live",
@@ -93,16 +109,16 @@ curl -s -X POST http://localhost:8080/channels \
   }'
 
 # Start / stop
-curl -X POST http://localhost:8080/channels/{id}/start
-curl -X POST http://localhost:8080/channels/{id}/stop
+curl -X POST http://localhost:8080/api/channels/{id}/start
+curl -X POST http://localhost:8080/api/channels/{id}/stop
 
 # Browse assets / workers / media
-curl http://localhost:8080/assets
-curl "http://localhost:8080/assets?channel_id={id}"
-curl http://localhost:8080/assets/{asset_id}
-curl http://localhost:8080/assets/{asset_id}/thumbnail
-curl http://localhost:8080/assets/{asset_id}/proxy/playlist.m3u8
-curl http://localhost:8080/workers
+curl http://localhost:8080/api/assets
+curl "http://localhost:8080/api/assets?channel_id={id}"
+curl http://localhost:8080/api/assets/{asset_id}
+curl http://localhost:8080/api/assets/{asset_id}/thumbnail
+curl http://localhost:8080/api/assets/{asset_id}/proxy/playlist.m3u8
+curl http://localhost:8080/api/workers
 curl http://localhost:8080/health
 ```
 
@@ -123,7 +139,8 @@ ingest_farm/
   worker/                   # GStreamer recorder
   orchestrator/             # Redis job scheduler
   postprocess/              # HLS proxy + thumbnail + catalog
-  api/                      # FastAPI control plane + media serving
+  api/                      # FastAPI control plane + media serving + SPA
+web/                        # Vite + React ops console
 scripts/
   capture_test.py           # Pipeline-only smoke test
   control_plane_test.py     # API → worker → asset E2E test

@@ -39,6 +39,14 @@ services:
     profiles:
       - s3
 
+  web:
+    image: node:22-alpine
+    working_dir: /web
+    volumes:
+      - ./web:/web
+      - web_node_modules:/web/node_modules
+    command: sh -c "npm ci && npm run build"
+
   api:
     build:
       context: .
@@ -56,11 +64,14 @@ services:
       - ./data:/data
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
+      - ./web/dist:/app/web/dist:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      web:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -131,3 +142,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  web_node_modules:

@@ -40,7 +40,7 @@ def wait_for_ready(client: httpx.Client, timeout: float = 90.0) -> None:
 def wait_for_workers(client: httpx.Client, timeout: float = 60.0) -> list[dict[str, Any]]:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        workers = client.get("/workers").json()
+        workers = client.get("/api/workers").json()
         if workers:
             logger.info("Workers online: %s", [w.get("hostname") for w in workers])
             return workers
@@ -57,7 +57,7 @@ def wait_channel_status(
     deadline = time.time() + timeout
     last: dict[str, Any] = {}
     while time.time() < deadline:
-        last = client.get(f"/channels/{channel_id}").json()
+        last = client.get(f"/api/channels/{channel_id}").json()
         if last.get("status") in wanted:
             return last
         time.sleep(0.5)
@@ -71,7 +71,7 @@ def wait_for_asset(
 ) -> dict[str, Any]:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        assets = client.get("/assets").json()
+        assets = client.get("/api/assets").json()
         for asset in assets:
             if channel_name in (asset.get("title") or ""):
                 return asset
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         wait_for_workers(client)
 
         created = client.post(
-            "/channels",
+            "/api/channels",
             json={
                 "name": channel_name,
                 "source": {
@@ -145,14 +145,14 @@ def main(argv: list[str] | None = None) -> int:
         channel_id = channel["id"]
         logger.info("Created channel %s (%s)", channel_name, channel_id)
 
-        started = client.post(f"/channels/{channel_id}/start")
+        started = client.post(f"/api/channels/{channel_id}/start")
         started.raise_for_status()
         wait_channel_status(client, channel_id, {"recording"})
         logger.info("Channel is recording")
 
         send_udp_ts(args.udp_host, args.udp_port, args.duration)
 
-        stopped = client.post(f"/channels/{channel_id}/stop")
+        stopped = client.post(f"/api/channels/{channel_id}/stop")
         stopped.raise_for_status()
         wait_channel_status(client, channel_id, {"idle", "stopping"})
         # Worker may briefly report stopping before idle.

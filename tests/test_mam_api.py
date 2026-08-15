@@ -80,28 +80,31 @@ def test_asset_media_serving(client_and_db, tmp_path: Path) -> None:
         asset_id = asset.id
         channel_id = channel.id
 
-    listed = client.get(f"/assets?channel_id={channel_id}")
+    listed = client.get(f"/api/assets?channel_id={channel_id}")
     assert listed.status_code == 200
     body = listed.json()
     assert len(body) == 1
-    assert body[0]["urls"]["thumbnail"] == f"/assets/{asset_id}/thumbnail"
-    assert body[0]["urls"]["proxy_playlist"] == f"/assets/{asset_id}/proxy/playlist.m3u8"
+    assert body[0]["channel_id"] == channel_id
+    assert body[0]["channel_name"] == "mam-channel"
+    assert body[0]["urls"]["thumbnail"] == f"/api/assets/{asset_id}/thumbnail"
+    assert body[0]["urls"]["proxy_playlist"] == f"/api/assets/{asset_id}/proxy/playlist.m3u8"
 
-    detail = client.get(f"/assets/{asset_id}")
+    detail = client.get(f"/api/assets/{asset_id}")
     assert detail.status_code == 200
+    assert detail.json()["channel_name"] == "mam-channel"
 
-    thumb_resp = client.get(f"/assets/{asset_id}/thumbnail")
+    thumb_resp = client.get(f"/api/assets/{asset_id}/thumbnail")
     assert thumb_resp.status_code == 200
     assert thumb_resp.content.startswith(b"\xff\xd8")
 
-    master_resp = client.get(f"/assets/{asset_id}/master")
+    master_resp = client.get(f"/api/assets/{asset_id}/master")
     assert master_resp.status_code == 200
     assert master_resp.content[0:1] == b"\x47"
 
-    playlist_resp = client.get(f"/assets/{asset_id}/proxy/playlist.m3u8")
+    playlist_resp = client.get(f"/api/assets/{asset_id}/proxy/playlist.m3u8")
     assert playlist_resp.status_code == 200
-    assert f"/assets/{asset_id}/proxy/segment_00000.ts" in playlist_resp.text
+    assert f"/api/assets/{asset_id}/proxy/segment_00000.ts" in playlist_resp.text
 
-    segment_resp = client.get(f"/assets/{asset_id}/proxy/segment_00000.ts")
+    segment_resp = client.get(f"/api/assets/{asset_id}/proxy/segment_00000.ts")
     assert segment_resp.status_code == 200
     assert segment_resp.content[0:1] == b"\x47"
