@@ -4,6 +4,7 @@ import { AssetDetailPage } from "./pages/AssetDetailPage";
 import { AssetsPage } from "./pages/AssetsPage";
 import { ChannelDetailPage } from "./pages/ChannelDetailPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
+import { RecordingsPage } from "./pages/RecordingsPage";
 import { WorkersPage } from "./pages/WorkersPage";
 
 export function App() {
@@ -15,6 +16,7 @@ export function App() {
           <Route path="/channels/:channelId" element={<ChannelDetailPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/assets/:assetId" element={<AssetDetailPage />} />
+          <Route path="/recordings" element={<RecordingsPage />} />
           <Route path="/workers" element={<WorkersPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

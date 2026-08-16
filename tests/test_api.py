@@ -215,3 +215,126 @@ def test_transcode_remux_rejected(client: TestClient) -> None:
     }
     response = client.post("/api/channels", json=payload)
     assert response.status_code == 422
+
+
+def test_update_channel_idle(client: TestClient) -> None:
+    created = client.post(
+        "/api/channels",
+        json={
+            "name": "patch-me",
+            "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5000"},
+        },
+    )
+    channel_id = created.json()["id"]
+
+    updated = client.patch(
+        f"/api/channels/{channel_id}",
+        json={"name": "patched", "enabled": False},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["name"] == "patched"
+    assert body["enabled"] is False
+
+
+def test_update_channel_rejected_when_live(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ingest_farm.api import main as api_main
+    from ingest_farm.models import Channel
+
+    created = client.post(
+        "/api/channels",
+        json={
+            "name": "live-patch",
+            "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5001"},
+        },
+    )
+    channel_id = created.json()["id"]
+
+    def _connect(db, channel_id: str) -> None:  # noqa: ANN001
+        ch = db.get(Channel, channel_id)
+        ch.status = "connected"
+        db.commit()
+
+    monkeypatch.setattr(api_main.scheduler, "connect_channel", _connect)
+    client.post(f"/api/channels/{channel_id}/connect")
+
+    response = client.patch(f"/api/channels/{channel_id}", json={"name": "nope"})
+    assert response.status_code == 400
+
+
+def test_update_channel_name_conflict(client: TestClient) -> None:
+    first = client.post(
+        "/api/channels",
+        json={
+            "name": "first-ch",
+            "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5002"},
+        },
+    )
+    second = client.post(
+        "/api/channels",
+        json={
+            "name": "second-ch",
+            "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5003"},
+        },
+    )
+    channel_id = second.json()["id"]
+
+    response = client.patch(
+        f"/api/channels/{channel_id}",
+        json={"name": "first-ch"},
+    )
+    assert response.status_code == 409
+
+
+def test_delete_channel_cascade(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ingest_farm.config import get_settings
+    from ingest_farm.db import get_db
+    from ingest_farm.models import Asset, Recording
+    from ingest_farm.schemas import new_id
+
+    monkeypatch.setattr(get_settings(), "storage_root", tmp_path)
+
+    created = client.post(
+        "/api/channels",
+        json={
+            "name": "delete-me",
+            "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5004"},
+        },
+    )
+    channel_id = created.json()["id"]
+    session_dir = tmp_path / channel_id / "session-1"
+    session_dir.mkdir(parents=True)
+    (session_dir / "segment_00000.ts").write_bytes(b"\x47" + b"\x00" * 187)
+
+    override = client.app.dependency_overrides.get(get_db)
+    assert override is not None
+    db = next(override())
+    try:
+        recording = Recording(
+            id=new_id(),
+            channel_id=channel_id,
+            storage_path=str(session_dir),
+            status="completed",
+        )
+        db.add(recording)
+        db.add(
+            Asset(
+                id=new_id(),
+                recording_id=recording.id,
+                title="delete-me — test",
+                master_path=str(session_dir / "segment_00000.ts"),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.delete(f"/api/channels/{channel_id}")
+    assert response.status_code == 204
+    assert client.get(f"/api/channels/{channel_id}").status_code == 404
+    assert not session_dir.exists()
+    assert client.get("/api/assets").json() == []

@@ -1,14 +1,19 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
   connectChannel,
+  deleteChannel,
+  deleteRecording,
   disconnectChannel,
   getChannel,
   listAssets,
+  listRecordings,
   startRecording,
   stopRecording,
 } from "../api/client";
+import { ChannelFormModal } from "../components/ChannelFormModal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { LiveThumb } from "../components/LiveThumb";
 import { SrtStatsPanel } from "../components/SrtStatsPanel";
 import { StatusBadge } from "../components/StatusBadge";
@@ -24,7 +29,10 @@ const LIVE = new Set([
   "disconnecting",
 ]);
 
+const IDLE = new Set(["idle", "error"]);
+
 export function ChannelDetailPage() {
+  const navigate = useNavigate();
   const { channelId } = useParams();
   const { data: channel, error, reload } = usePoll(
     () => getChannel(channelId as string),
@@ -36,7 +44,15 @@ export function ChannelDetailPage() {
     4000,
     channelId,
   );
+  const { data: recordings, reload: reloadRecordings } = usePoll(
+    () => listRecordings({ channel_id: channelId }),
+    4000,
+    channelId,
+  );
   const [busy, setBusy] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteRecordingId, setDeleteRecordingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   if (!channelId) return <p className="text-signal-err">Missing channel id</p>;
@@ -44,6 +60,7 @@ export function ChannelDetailPage() {
   if (!channel) return <p className="text-slate-400">Loading…</p>;
 
   const live = LIVE.has(channel.status);
+  const canModify = IDLE.has(channel.status);
   const recording = channel.status === "recording" || channel.status === "starting";
   const canRecord =
     channel.status === "connected" ||
@@ -63,6 +80,33 @@ export function ChannelDetailPage() {
     }
   };
 
+  const confirmDeleteChannel = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await deleteChannel(channel.id);
+      navigate("/");
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.detail : "Failed to delete channel");
+      setBusy(false);
+    }
+  };
+
+  const confirmDeleteRecording = async () => {
+    if (!deleteRecordingId) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await deleteRecording(deleteRecordingId);
+      setDeleteRecordingId(null);
+      reloadRecordings();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.detail : "Failed to delete recording");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
@@ -76,6 +120,20 @@ export function ChannelDetailPage() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button
+            className="btn-ghost"
+            disabled={busy || !canModify}
+            onClick={() => setEditOpen(true)}
+          >
+            Edit
+          </button>
+          <button
+            className="btn-danger"
+            disabled={busy || !canModify}
+            onClick={() => setDeleteOpen(true)}
+          >
+            Delete
+          </button>
           {!live ? (
             <button className="btn-primary" disabled={busy} onClick={() => void run(connectChannel)}>
               Connect
@@ -142,6 +200,51 @@ export function ChannelDetailPage() {
 
       <section>
         <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-slate-400">
+          Recordings
+        </h2>
+        <div className="panel overflow-hidden">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-ink-700 text-xs uppercase tracking-wide text-slate-400">
+              <tr>
+                <th className="px-4 py-2 font-medium">Started</th>
+                <th className="px-4 py-2 font-medium">Status</th>
+                <th className="px-4 py-2 font-medium">Segments</th>
+                <th className="px-4 py-2 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {(recordings ?? []).length === 0 && (
+                <tr>
+                  <td className="px-4 py-6 text-slate-500" colSpan={4}>
+                    No recordings for this channel yet.
+                  </td>
+                </tr>
+              )}
+              {(recordings ?? []).map((rec) => (
+                <tr key={rec.id} className="border-t border-ink-600">
+                  <td className="px-4 py-3 text-slate-400">{formatWhen(rec.started_at)}</td>
+                  <td className="px-4 py-3">
+                    <StatusBadge status={rec.status} />
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs">{rec.segment_count}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      className="btn-danger"
+                      disabled={busy || rec.status === "recording"}
+                      onClick={() => setDeleteRecordingId(rec.id)}
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-slate-400">
           Assets
         </h2>
         <div className="panel overflow-hidden">
@@ -178,6 +281,30 @@ export function ChannelDetailPage() {
           </table>
         </div>
       </section>
+
+      <ChannelFormModal
+        open={editOpen}
+        mode="edit"
+        channel={channel}
+        onClose={() => setEditOpen(false)}
+        onSaved={reload}
+      />
+      <ConfirmDialog
+        open={deleteOpen}
+        title="Delete channel"
+        message={`Delete "${channel.name}" and all recordings with media files? This cannot be undone.`}
+        busy={busy}
+        onCancel={() => setDeleteOpen(false)}
+        onConfirm={() => void confirmDeleteChannel()}
+      />
+      <ConfirmDialog
+        open={deleteRecordingId !== null}
+        title="Delete recording"
+        message="Delete this recording and all associated media files? This cannot be undone."
+        busy={busy}
+        onCancel={() => setDeleteRecordingId(null)}
+        onConfirm={() => void confirmDeleteRecording()}
+      />
     </div>
   );
 }

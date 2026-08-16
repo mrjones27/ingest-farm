@@ -41,6 +41,7 @@ class Recording(Base):
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     segment_count: Mapped[int] = mapped_column(Integer, default=0)
     byte_size: Mapped[int] = mapped_column(BigInteger, default=0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
 
     channel: Mapped[Channel] = relationship(back_populates="recordings")
     asset: Mapped[Asset | None] = relationship(back_populates="recording", uselist=False)

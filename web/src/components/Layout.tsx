@@ -4,6 +4,7 @@ import { usePoll } from "../hooks/usePoll";
 
 const NAV = [
   { to: "/", label: "Channels", end: true },
+  { to: "/recordings", label: "Recordings" },
   { to: "/assets", label: "Assets" },
   { to: "/workers", label: "Workers" },
 ];

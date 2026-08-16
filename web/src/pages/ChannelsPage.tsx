@@ -1,31 +1,22 @@
-import { FormEvent, useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ApiError,
   connectChannel,
-  createChannel,
+  deleteChannel,
   disconnectChannel,
   listChannels,
   startRecording,
   stopRecording,
 } from "../api/client";
-import type { Channel, ChannelCreate, PipelineProfile, SourceProtocol } from "../api/types";
+import type { Channel } from "../api/types";
+import { ChannelFormModal } from "../components/ChannelFormModal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { LiveThumb } from "../components/LiveThumb";
 import { SrtStatsPanel } from "../components/SrtStatsPanel";
 import { StatusBadge } from "../components/StatusBadge";
 import { usePoll } from "../hooks/usePoll";
 import { formatWhen } from "../lib/format";
-
-const PROTOCOLS: SourceProtocol[] = ["srt", "udp", "rtmp", "hls", "file"];
-const PROFILES: PipelineProfile[] = ["ts_passthrough"];
-
-const URI_HINT: Record<SourceProtocol, string> = {
-  srt: "srt://0.0.0.0:9000?mode=listener",
-  udp: "udp://0.0.0.0:5000",
-  rtmp: "rtmp://example.com/live/stream",
-  hls: "https://example.com/live/index.m3u8",
-  file: "/path/to/source.ts",
-};
 
 const LIVE = new Set([
   "connecting",
@@ -36,6 +27,8 @@ const LIVE = new Set([
   "disconnecting",
 ]);
 
+const IDLE = new Set(["idle", "error"]);
+
 function ChannelActions({
   channel,
   busyId,
@@ -43,6 +36,8 @@ function ChannelActions({
   onDisconnect,
   onRecord,
   onStopRecord,
+  onEdit,
+  onDelete,
 }: {
   channel: Channel;
   busyId: string | null;
@@ -50,9 +45,12 @@ function ChannelActions({
   onDisconnect: (id: string) => void;
   onRecord: (id: string) => void;
   onStopRecord: (id: string) => void;
+  onEdit: (channel: Channel) => void;
+  onDelete: (channel: Channel) => void;
 }) {
   const busy = busyId === channel.id;
   const live = LIVE.has(channel.status);
+  const canModify = IDLE.has(channel.status);
   const recording = channel.status === "recording" || channel.status === "starting";
   const canRecord =
     channel.status === "connected" ||
@@ -61,6 +59,20 @@ function ChannelActions({
 
   return (
     <div className="flex flex-wrap justify-end gap-2">
+      <button
+        className="btn-ghost"
+        disabled={busy || !canModify}
+        onClick={() => onEdit(channel)}
+      >
+        Edit
+      </button>
+      <button
+        className="btn-danger"
+        disabled={busy || !canModify}
+        onClick={() => onDelete(channel)}
+      >
+        Delete
+      </button>
       {!live ? (
         <button className="btn-primary" disabled={busy} onClick={() => onConnect(channel.id)}>
           Connect
@@ -87,193 +99,11 @@ function ChannelActions({
   );
 }
 
-function CreateChannelModal({
-  open,
-  onClose,
-  onCreated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [protocol, setProtocol] = useState<SourceProtocol>("udp");
-  const [uri, setUri] = useState(URI_HINT.udp);
-  const [caps, setCaps] = useState("video/mpegts");
-  const [transport, setTransport] = useState("mpegts");
-  const [profile, setProfile] = useState<PipelineProfile>("ts_passthrough");
-  const [segmentDuration, setSegmentDuration] = useState(3600);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  if (!open) return null;
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setSaving(true);
-    setError(null);
-    const config: Record<string, unknown> = {};
-    if (protocol === "udp") {
-      if (caps) config.caps = caps;
-      if (transport) config.transport = transport;
-    }
-    const payload: ChannelCreate = {
-      name: name.trim(),
-      source: { protocol, uri: uri.trim(), config },
-      pipeline: {
-        profile,
-        segment_duration_sec: segmentDuration,
-        video: {},
-        audio: {},
-      },
-    };
-    try {
-      await createChannel(payload);
-      onCreated();
-      onClose();
-      setName("");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Failed to create channel");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/70 p-6 pt-24">
-      <form className="panel w-full max-w-lg p-5 shadow-xl" onSubmit={submit}>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-medium">New channel</h2>
-          <button type="button" className="btn-ghost" onClick={onClose}>
-            Close
-          </button>
-        </div>
-        <div className="space-y-3">
-          <div>
-            <label className="label" htmlFor="ch-name">
-              Name
-            </label>
-            <input
-              id="ch-name"
-              className="field"
-              required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label" htmlFor="ch-protocol">
-                Protocol
-              </label>
-              <select
-                id="ch-protocol"
-                className="field"
-                value={protocol}
-                onChange={(e) => {
-                  const next = e.target.value as SourceProtocol;
-                  setProtocol(next);
-                  setUri(URI_HINT[next]);
-                }}
-              >
-                {PROTOCOLS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label" htmlFor="ch-profile">
-                Pipeline
-              </label>
-              <select
-                id="ch-profile"
-                className="field"
-                value={profile}
-                onChange={(e) => setProfile(e.target.value as PipelineProfile)}
-              >
-                {PROFILES.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div>
-            <label className="label" htmlFor="ch-uri">
-              Source URI
-            </label>
-            <input
-              id="ch-uri"
-              className="field font-mono"
-              required
-              value={uri}
-              onChange={(e) => setUri(e.target.value)}
-            />
-          </div>
-          {protocol === "udp" && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label" htmlFor="ch-caps">
-                  Caps
-                </label>
-                <input
-                  id="ch-caps"
-                  className="field font-mono"
-                  value={caps}
-                  onChange={(e) => setCaps(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label" htmlFor="ch-transport">
-                  Transport
-                </label>
-                <select
-                  id="ch-transport"
-                  className="field"
-                  value={transport}
-                  onChange={(e) => setTransport(e.target.value)}
-                >
-                  <option value="mpegts">mpegts</option>
-                  <option value="rtp-h264">rtp-h264</option>
-                  <option value="rtp-mp2t">rtp-mp2t</option>
-                </select>
-              </div>
-            </div>
-          )}
-          <div>
-            <label className="label" htmlFor="ch-seg">
-              Segment duration (sec)
-            </label>
-            <input
-              id="ch-seg"
-              className="field"
-              type="number"
-              min={1}
-              value={segmentDuration}
-              onChange={(e) => setSegmentDuration(Number(e.target.value))}
-            />
-          </div>
-          {error && <p className="text-sm text-signal-err">{error}</p>}
-        </div>
-        <div className="mt-5 flex justify-end gap-2">
-          <button type="button" className="btn-ghost" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="btn-primary" disabled={saving}>
-            {saving ? "Creating…" : "Create"}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
 export function ChannelsPage() {
   const { data, error, reload } = usePoll(listChannels, 2000);
-  const [open, setOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editChannel, setEditChannel] = useState<Channel | null>(null);
+  const [deleteChannelTarget, setDeleteChannelTarget] = useState<Channel | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const channels = data ?? [];
@@ -291,6 +121,21 @@ export function ChannelsPage() {
     }
   };
 
+  const confirmDelete = async () => {
+    if (!deleteChannelTarget) return;
+    setBusyId(deleteChannelTarget.id);
+    setActionError(null);
+    try {
+      await deleteChannel(deleteChannelTarget.id);
+      setDeleteChannelTarget(null);
+      reload();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.detail : "Failed to delete channel");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
@@ -300,7 +145,7 @@ export function ChannelsPage() {
             Connect a source for live preview, then record when you need a capture.
           </p>
         </div>
-        <button className="btn-primary" onClick={() => setOpen(true)}>
+        <button className="btn-primary" onClick={() => setCreateOpen(true)}>
           New channel
         </button>
       </div>
@@ -371,6 +216,8 @@ export function ChannelsPage() {
                     onDisconnect={(id) => void run(id, disconnectChannel)}
                     onRecord={(id) => void run(id, startRecording)}
                     onStopRecord={(id) => void run(id, stopRecording)}
+                    onEdit={setEditChannel}
+                    onDelete={setDeleteChannelTarget}
                   />
                 </td>
               </tr>
@@ -378,7 +225,28 @@ export function ChannelsPage() {
           </tbody>
         </table>
       </div>
-      <CreateChannelModal open={open} onClose={() => setOpen(false)} onCreated={reload} />
+
+      <ChannelFormModal
+        open={createOpen}
+        mode="create"
+        onClose={() => setCreateOpen(false)}
+        onSaved={reload}
+      />
+      <ChannelFormModal
+        open={editChannel !== null}
+        mode="edit"
+        channel={editChannel ?? undefined}
+        onClose={() => setEditChannel(null)}
+        onSaved={reload}
+      />
+      <ConfirmDialog
+        open={deleteChannelTarget !== null}
+        title="Delete channel"
+        message={`Delete "${deleteChannelTarget?.name}" and all recordings with media files? This cannot be undone.`}
+        busy={busyId === deleteChannelTarget?.id}
+        onCancel={() => setDeleteChannelTarget(null)}
+        onConfirm={() => void confirmDelete()}
+      />
     </div>
   );
 }

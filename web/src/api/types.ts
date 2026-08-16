@@ -41,6 +41,37 @@ export interface ChannelCreate {
   output?: Partial<OutputConfig>;
 }
 
+export interface ChannelUpdate {
+  name?: string;
+  source?: SourceConfig;
+  pipeline?: Partial<PipelineConfig>;
+  output?: Partial<OutputConfig>;
+  enabled?: boolean;
+}
+
+export type RecordingStatus = "recording" | "completed" | "failed";
+
+export interface Recording {
+  id: string;
+  channel_id: string;
+  started_at: string;
+  ended_at: string | null;
+  status: RecordingStatus;
+  storage_path: string;
+  segment_count: number;
+  byte_size: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface RecordingUpdate {
+  metadata?: Record<string, unknown>;
+}
+
+export interface AssetUpdate {
+  title?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface Asset {
   id: string;
   recording_id: string;
@@ -81,5 +112,11 @@ export interface HealthStatus {
 export interface AssetListParams {
   q?: string;
   channel_id?: string;
+  limit?: number;
+}
+
+export interface RecordingListParams {
+  channel_id?: string;
+  status?: RecordingStatus;
   limit?: number;
 }

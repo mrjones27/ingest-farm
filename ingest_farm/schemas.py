@@ -112,6 +112,14 @@ class ChannelCreate(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
 
 
+class ChannelUpdate(BaseModel):
+    name: str | None = None
+    source: SourceConfig | None = None
+    pipeline: PipelineConfig | None = None
+    output: OutputConfig | None = None
+    enabled: bool | None = None
+
+
 class ChannelResponse(BaseModel):
     id: str
     name: str
@@ -142,8 +150,18 @@ class RecordingResponse(BaseModel):
     storage_path: str
     segment_count: int
     byte_size: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"from_attributes": True}
+
+
+class RecordingUpdate(BaseModel):
+    metadata: dict[str, Any] | None = None
+
+
+class AssetUpdate(BaseModel):
+    title: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class AssetResponse(BaseModel):

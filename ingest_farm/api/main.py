@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session, contains_eager, joinedload
 
+from ingest_farm.common.cleanup import delete_recording_media
 from ingest_farm.common.events import get_channel_stats, get_redis
 from ingest_farm.db import get_db, get_engine
 from ingest_farm.models import Asset, Channel, Recording, Worker
@@ -15,10 +16,15 @@ from ingest_farm.orchestrator.scheduler import Scheduler
 from ingest_farm.pipeline.encoders.registry import default_registry
 from ingest_farm.schemas import (
     AssetResponse,
+    AssetUpdate,
     ChannelCreate,
     ChannelResponse,
+    ChannelUpdate,
     OutputConfig,
     PipelineConfig,
+    RecordingResponse,
+    RecordingStatus,
+    RecordingUpdate,
     SourceConfig,
     WorkerResponse,
 )
@@ -152,6 +158,39 @@ def _asset_response(asset: Asset) -> AssetResponse:
     )
 
 
+def _recording_response(recording: Recording) -> RecordingResponse:
+    return RecordingResponse(
+        id=recording.id,
+        channel_id=recording.channel_id,
+        started_at=recording.started_at,
+        ended_at=recording.ended_at,
+        status=RecordingStatus(recording.status),
+        storage_path=recording.storage_path,
+        segment_count=recording.segment_count,
+        byte_size=recording.byte_size,
+        metadata=recording.metadata_json or {},
+    )
+
+
+_IDLE_CHANNEL_STATUSES = {"idle", "error"}
+
+
+def _require_idle_channel(channel: Channel) -> None:
+    if channel.status not in _IDLE_CHANNEL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Channel must be idle or error (status={channel.status})",
+        )
+
+
+def _delete_recording(db: Session, recording: Recording) -> None:
+    asset = db.query(Asset).filter_by(recording_id=recording.id).one_or_none()
+    delete_recording_media(recording, asset)
+    if asset is not None:
+        db.delete(asset)
+    db.delete(recording)
+
+
 def _safe_under(root: Path, candidate: Path) -> Path:
     root = root.resolve()
     target = candidate.resolve()
@@ -223,6 +262,57 @@ def get_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelRespon
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
     return _channel_response(channel)
+
+
+@router.patch("/channels/{channel_id}", response_model=ChannelResponse)
+def update_channel(
+    channel_id: str,
+    payload: ChannelUpdate,
+    db: Session = Depends(get_db),
+) -> ChannelResponse:
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    _require_idle_channel(channel)
+
+    if payload.name is not None:
+        existing = (
+            db.query(Channel)
+            .filter(Channel.name == payload.name, Channel.id != channel_id)
+            .one_or_none()
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="Channel name already exists")
+        channel.name = payload.name
+    if payload.source is not None:
+        channel.protocol = payload.source.protocol.value
+        channel.source_uri = payload.source.uri
+        channel.source_config = payload.source.config
+    if payload.pipeline is not None:
+        channel.pipeline_profile = payload.pipeline.model_dump(mode="json")
+    if payload.output is not None:
+        channel.output_config = payload.output.model_dump(mode="json")
+    if payload.enabled is not None:
+        channel.enabled = payload.enabled
+
+    db.commit()
+    db.refresh(channel)
+    return _channel_response(channel)
+
+
+@router.delete("/channels/{channel_id}", status_code=204)
+def delete_channel(channel_id: str, db: Session = Depends(get_db)) -> Response:
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    _require_idle_channel(channel)
+
+    recordings = db.query(Recording).filter_by(channel_id=channel_id).all()
+    for recording in recordings:
+        _delete_recording(db, recording)
+    db.delete(channel)
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.post("/channels/{channel_id}/connect", response_model=ChannelResponse)
@@ -347,6 +437,71 @@ def stop_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelRespo
     return _channel_response(channel)
 
 
+def _query_recordings(
+    db: Session,
+    *,
+    channel_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[RecordingResponse]:
+    query = db.query(Recording).order_by(Recording.started_at.desc())
+    if channel_id:
+        query = query.filter(Recording.channel_id == channel_id)
+    if status:
+        query = query.filter(Recording.status == status)
+    return [_recording_response(r) for r in query.limit(limit).all()]
+
+
+@router.get("/recordings", response_model=list[RecordingResponse])
+def list_recordings(
+    channel_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[RecordingResponse]:
+    return _query_recordings(db, channel_id=channel_id, status=status, limit=limit)
+
+
+@router.get("/recordings/{recording_id}", response_model=RecordingResponse)
+def get_recording(recording_id: str, db: Session = Depends(get_db)) -> RecordingResponse:
+    recording = db.get(Recording, recording_id)
+    if recording is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return _recording_response(recording)
+
+
+@router.patch("/recordings/{recording_id}", response_model=RecordingResponse)
+def update_recording(
+    recording_id: str,
+    payload: RecordingUpdate,
+    db: Session = Depends(get_db),
+) -> RecordingResponse:
+    recording = db.get(Recording, recording_id)
+    if recording is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if recording.status == RecordingStatus.RECORDING.value:
+        raise HTTPException(status_code=400, detail="Cannot update an active recording")
+    if payload.metadata is not None:
+        merged = dict(recording.metadata_json or {})
+        merged.update(payload.metadata)
+        recording.metadata_json = merged
+    db.commit()
+    db.refresh(recording)
+    return _recording_response(recording)
+
+
+@router.delete("/recordings/{recording_id}", status_code=204)
+def delete_recording(recording_id: str, db: Session = Depends(get_db)) -> Response:
+    recording = db.get(Recording, recording_id)
+    if recording is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if recording.status == RecordingStatus.RECORDING.value:
+        raise HTTPException(status_code=400, detail="Cannot delete an active recording")
+    _delete_recording(db, recording)
+    db.commit()
+    return Response(status_code=204)
+
+
 def _query_assets(
     db: Session,
     *,
@@ -412,6 +567,46 @@ def get_asset(asset_id: str, db: Session = Depends(get_db)) -> AssetResponse:
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
     return _asset_response(asset)
+
+
+@router.patch("/assets/{asset_id}", response_model=AssetResponse)
+def update_asset(
+    asset_id: str,
+    payload: AssetUpdate,
+    db: Session = Depends(get_db),
+) -> AssetResponse:
+    asset = (
+        db.query(Asset)
+        .options(joinedload(Asset.recording).joinedload(Recording.channel))
+        .filter(Asset.id == asset_id)
+        .one_or_none()
+    )
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if payload.title is not None:
+        asset.title = payload.title
+    if payload.metadata is not None:
+        merged = dict(asset.metadata_json or {})
+        merged.update(payload.metadata)
+        asset.metadata_json = merged
+    db.commit()
+    db.refresh(asset)
+    return _asset_response(asset)
+
+
+@router.delete("/assets/{asset_id}", status_code=204)
+def delete_asset(asset_id: str, db: Session = Depends(get_db)) -> Response:
+    asset = db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    recording = db.get(Recording, asset.recording_id)
+    if recording is None:
+        db.delete(asset)
+        db.commit()
+        return Response(status_code=204)
+    _delete_recording(db, recording)
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/assets/{asset_id}/master")

@@ -1,4 +1,16 @@
-import type { Asset, AssetListParams, Channel, ChannelCreate, HealthStatus, Worker } from "./types";
+import type {
+  Asset,
+  AssetListParams,
+  AssetUpdate,
+  Channel,
+  ChannelCreate,
+  ChannelUpdate,
+  HealthStatus,
+  Recording,
+  RecordingListParams,
+  RecordingUpdate,
+  Worker,
+} from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -34,6 +46,27 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function requestVoid(url: string, init?: RequestInit): Promise<void> {
+  const headers = new Headers(init?.headers);
+  if (init?.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const response = await fetch(url, { ...init, headers });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const body: unknown = await response.json();
+      if (body && typeof body === "object" && "detail" in body) {
+        const raw = (body as { detail: unknown }).detail;
+        detail = typeof raw === "string" ? raw : JSON.stringify(raw);
+      }
+    } catch {
+      /* ignore parse errors */
+    }
+    throw new ApiError(response.status, detail);
+  }
+}
+
 export function getHealth(): Promise<HealthStatus> {
   return request<HealthStatus>("/health");
 }
@@ -51,6 +84,17 @@ export function createChannel(payload: ChannelCreate): Promise<Channel> {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function updateChannel(id: string, payload: ChannelUpdate): Promise<Channel> {
+  return request<Channel>(`/api/channels/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteChannel(id: string): Promise<void> {
+  return requestVoid(`/api/channels/${id}`, { method: "DELETE" });
 }
 
 export function connectChannel(id: string): Promise<Channel> {
@@ -98,6 +142,41 @@ export function listAssets(params: AssetListParams = {}): Promise<Asset[]> {
 
 export function getAsset(id: string): Promise<Asset> {
   return request<Asset>(`/api/assets/${id}`);
+}
+
+export function updateAsset(id: string, payload: AssetUpdate): Promise<Asset> {
+  return request<Asset>(`/api/assets/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteAsset(id: string): Promise<void> {
+  return requestVoid(`/api/assets/${id}`, { method: "DELETE" });
+}
+
+export function listRecordings(params: RecordingListParams = {}): Promise<Recording[]> {
+  const query = new URLSearchParams();
+  if (params.channel_id) query.set("channel_id", params.channel_id);
+  if (params.status) query.set("status", params.status);
+  if (params.limit) query.set("limit", String(params.limit));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<Recording[]>(`/api/recordings${suffix}`);
+}
+
+export function getRecording(id: string): Promise<Recording> {
+  return request<Recording>(`/api/recordings/${id}`);
+}
+
+export function updateRecording(id: string, payload: RecordingUpdate): Promise<Recording> {
+  return request<Recording>(`/api/recordings/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteRecording(id: string): Promise<void> {
+  return requestVoid(`/api/recordings/${id}`, { method: "DELETE" });
 }
 
 export function listWorkers(): Promise<Worker[]> {
