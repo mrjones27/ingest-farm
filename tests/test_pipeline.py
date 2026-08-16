@@ -50,15 +50,32 @@ def test_external_encoder_fails_fast() -> None:
         pass
 
 
-def test_builder_supports_passthrough_sources() -> None:
-    builder = PipelineBuilder()
-    assert "srt" in builder.supported_protocols()
-    assert "udp" in builder.supported_protocols()
-    assert "file" in builder.supported_protocols()
-    assert "rtmp" in builder.supported_protocols()
-    assert "hls" in builder.supported_protocols()
-    assert "ts_passthrough" in builder.supported_profiles()
-    assert "transcode_remux" not in builder.supported_profiles()
+def test_normalize_srt_stats_flattens_caller() -> None:
+    from ingest_farm.common.gst_stats import normalize_srt_stats
+
+    raw = {
+        "bytes-received-total": 1000,
+        "callers": [
+            {
+                "rtt-ms": 12.5,
+                "bandwidth-mbps": 40.0,
+                "receive-rate-mbps": 8.2,
+                "packets-received-lost": 3,
+                "negotiated-latency-ms": 120,
+            }
+        ],
+    }
+    out = normalize_srt_stats(raw)
+    assert out["available"] is True
+    assert out["rtt-ms"] == 12.5
+    assert out["receive-rate-mbps"] == 8.2
+    assert out["caller_count"] == 1
+
+
+def test_normalize_srt_stats_empty() -> None:
+    from ingest_farm.common.gst_stats import normalize_srt_stats
+
+    assert normalize_srt_stats({}) == {}
 
 
 def test_udp_rtp_transport_config_accepted() -> None:

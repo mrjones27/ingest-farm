@@ -62,6 +62,8 @@ class ChannelResponse(BaseModel):
     enabled: bool
     status: str = "idle"
     created_at: datetime
+    urls: dict[str, str | None] = Field(default_factory=dict)
+    stats: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
 

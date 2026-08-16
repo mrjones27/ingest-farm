@@ -145,19 +145,32 @@ def main(argv: list[str] | None = None) -> int:
         channel_id = channel["id"]
         logger.info("Created channel %s (%s)", channel_name, channel_id)
 
-        started = client.post(f"/api/channels/{channel_id}/start")
-        started.raise_for_status()
+        connected = client.post(f"/api/channels/{channel_id}/connect")
+        connected.raise_for_status()
+        wait_channel_status(client, channel_id, {"connected"})
+        logger.info("Channel connected (preview live)")
+
+        # Brief window with source before record — thumbnail should appear.
+        send_udp_ts(args.udp_host, args.udp_port, max(3, args.duration // 2))
+
+        recorded = client.post(f"/api/channels/{channel_id}/record/start")
+        recorded.raise_for_status()
         wait_channel_status(client, channel_id, {"recording"})
         logger.info("Channel is recording")
 
         send_udp_ts(args.udp_host, args.udp_port, args.duration)
 
-        stopped = client.post(f"/api/channels/{channel_id}/stop")
+        stopped = client.post(f"/api/channels/{channel_id}/record/stop")
         stopped.raise_for_status()
-        wait_channel_status(client, channel_id, {"idle", "stopping"})
-        # Worker may briefly report stopping before idle.
+        wait_channel_status(client, channel_id, {"connected", "stopping"})
+        wait_channel_status(client, channel_id, {"connected"}, timeout=30)
+        logger.info("Recording stopped; still connected")
+
+        disconnected = client.post(f"/api/channels/{channel_id}/disconnect")
+        disconnected.raise_for_status()
+        wait_channel_status(client, channel_id, {"idle", "disconnecting"})
         wait_channel_status(client, channel_id, {"idle"}, timeout=30)
-        logger.info("Channel stopped")
+        logger.info("Channel disconnected")
 
         asset = wait_for_asset(client, channel_name)
         logger.info(

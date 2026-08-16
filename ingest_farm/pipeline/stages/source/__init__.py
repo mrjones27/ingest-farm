@@ -62,21 +62,70 @@ def _add_mpegts_remux_bin(
 class SrtSourceStage(SourceStage):
     def link(self, upstream: Any, config: ChannelConfig, ctx: dict[str, Any]) -> Any:
         from gi.repository import Gst
+        from urllib.parse import parse_qs, urlparse
 
         src = Gst.ElementFactory.make("srtsrc", "source")
         if src is None:
             raise RuntimeError("GStreamer element 'srtsrc' not available — install gst-plugins-bad")
 
+        # Parent, then set uri once. Extra set_property after uri makes the
+        # next caller SIGSEGV/SIGABRT. make-add-uri survived 372 buffers.
+        ctx["pipeline"].add(src)
+
         uri = config.source.uri
         if not uri.startswith("srt://"):
             uri = f"srt://{uri}"
+        parsed = urlparse(uri)
+        query = parse_qs(parsed.query)
+        has_latency = "latency" in query or "latency" in config.source.config
+        applied_latency = None
+        if not has_latency:
+            uri = f"{uri}{'&' if parsed.query else '?'}latency=500"
+            applied_latency = 500
+        elif "latency" in query:
+            applied_latency = int(query["latency"][0])
         src.set_property("uri", uri)
 
-        for key, value in config.source.config.items():
-            if src.find_property(key):
-                src.set_property(key, value)
+        # #region agent log
+        from ingest_farm.common.agent_debug import agent_log
 
-        ctx["pipeline"].add(src)
+        parsed = urlparse(uri)
+        props = {}
+        for name in (
+            "uri",
+            "latency",
+            "wait-for-connection",
+            "keep-listening",
+            "authentication",
+            "auto-reconnect",
+            "localaddress",
+            "localport",
+            "mode",
+        ):
+            if src.find_property(name):
+                try:
+                    props[name] = src.get_property(name)
+                except Exception as exc:
+                    props[name] = f"err:{exc}"
+        agent_log(
+            "A",
+            "source/__init__.py:SrtSourceStage.link",
+            "srtsrc bind config",
+            {
+                "uri": uri,
+                "host": parsed.hostname,
+                "port": parsed.port,
+                "query": parsed.query,
+                "applied_latency": applied_latency,
+                "from_default": not has_latency,
+                "props": props,
+            },
+            run_id="obs-caller",
+        )
+        # #endregion
+
+        ctx["source_element"] = src
+        ctx["source_kind"] = "srt"
         return src
 
 

@@ -1,7 +1,17 @@
 import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
-import { ApiError, createChannel, listChannels, startChannel, stopChannel } from "../api/client";
+import {
+  ApiError,
+  connectChannel,
+  createChannel,
+  disconnectChannel,
+  listChannels,
+  startRecording,
+  stopRecording,
+} from "../api/client";
 import type { Channel, ChannelCreate, PipelineProfile, SourceProtocol } from "../api/types";
+import { LiveThumb } from "../components/LiveThumb";
+import { SrtStatsPanel } from "../components/SrtStatsPanel";
 import { StatusBadge } from "../components/StatusBadge";
 import { usePoll } from "../hooks/usePoll";
 import { formatWhen } from "../lib/format";
@@ -17,28 +27,60 @@ const URI_HINT: Record<SourceProtocol, string> = {
   file: "/path/to/source.ts",
 };
 
+const LIVE = new Set([
+  "connecting",
+  "connected",
+  "recording",
+  "starting",
+  "stopping",
+  "disconnecting",
+]);
+
 function ChannelActions({
   channel,
   busyId,
-  onStart,
-  onStop,
+  onConnect,
+  onDisconnect,
+  onRecord,
+  onStopRecord,
 }: {
   channel: Channel;
   busyId: string | null;
-  onStart: (id: string) => void;
-  onStop: (id: string) => void;
+  onConnect: (id: string) => void;
+  onDisconnect: (id: string) => void;
+  onRecord: (id: string) => void;
+  onStopRecord: (id: string) => void;
 }) {
   const busy = busyId === channel.id;
+  const live = LIVE.has(channel.status);
   const recording = channel.status === "recording" || channel.status === "starting";
+  const canRecord =
+    channel.status === "connected" ||
+    channel.status === "connecting" ||
+    channel.status === "stopping";
+
   return (
-    <div className="flex gap-2">
+    <div className="flex flex-wrap justify-end gap-2">
+      {!live ? (
+        <button className="btn-primary" disabled={busy} onClick={() => onConnect(channel.id)}>
+          Connect
+        </button>
+      ) : (
+        <button className="btn-ghost" disabled={busy} onClick={() => onDisconnect(channel.id)}>
+          Disconnect
+        </button>
+      )}
       {recording ? (
-        <button className="btn-danger" disabled={busy} onClick={() => onStop(channel.id)}>
+        <button className="btn-danger" disabled={busy} onClick={() => onStopRecord(channel.id)}>
           Stop
         </button>
       ) : (
-        <button className="btn-live" disabled={busy} onClick={() => onStart(channel.id)}>
-          Start
+        <button
+          className="btn-live"
+          disabled={busy || !canRecord}
+          onClick={() => onRecord(channel.id)}
+        >
+          Record
         </button>
       )}
     </div>
@@ -254,7 +296,9 @@ export function ChannelsPage() {
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">Channels</h1>
-          <p className="text-sm text-slate-400">Create ingest sources and start or stop recording.</p>
+          <p className="text-sm text-slate-400">
+            Connect a source for live preview, then record when you need a capture.
+          </p>
         </div>
         <button className="btn-primary" onClick={() => setOpen(true)}>
           New channel
@@ -267,10 +311,12 @@ export function ChannelsPage() {
         <table className="w-full text-left text-sm">
           <thead className="bg-ink-700 text-xs uppercase tracking-wide text-slate-400">
             <tr>
+              <th className="px-4 py-2 font-medium">Preview</th>
               <th className="px-4 py-2 font-medium">Name</th>
               <th className="px-4 py-2 font-medium">Protocol</th>
               <th className="px-4 py-2 font-medium">URI</th>
               <th className="px-4 py-2 font-medium">Status</th>
+              <th className="px-4 py-2 font-medium">SRT</th>
               <th className="px-4 py-2 font-medium">Created</th>
               <th className="px-4 py-2 font-medium" />
             </tr>
@@ -278,7 +324,7 @@ export function ChannelsPage() {
           <tbody>
             {channels.length === 0 && (
               <tr>
-                <td className="px-4 py-8 text-center text-slate-500" colSpan={6}>
+                <td className="px-4 py-8 text-center text-slate-500" colSpan={8}>
                   No channels yet. Create one to start ingest.
                 </td>
               </tr>
@@ -286,7 +332,17 @@ export function ChannelsPage() {
             {channels.map((channel) => (
               <tr key={channel.id} className="border-t border-ink-600">
                 <td className="px-4 py-3">
-                  <Link className="font-medium text-sky-400 hover:text-sky-300" to={`/channels/${channel.id}`}>
+                  <LiveThumb
+                    url={channel.urls?.thumbnail}
+                    alt={`${channel.name} preview`}
+                    className="h-14 w-24 rounded"
+                  />
+                </td>
+                <td className="px-4 py-3">
+                  <Link
+                    className="font-medium text-sky-400 hover:text-sky-300"
+                    to={`/channels/${channel.id}`}
+                  >
                     {channel.name}
                   </Link>
                 </td>
@@ -297,13 +353,24 @@ export function ChannelsPage() {
                 <td className="px-4 py-3">
                   <StatusBadge status={channel.status} />
                 </td>
-                <td className="whitespace-nowrap px-4 py-3 text-slate-400">{formatWhen(channel.created_at)}</td>
+                <td className="whitespace-nowrap px-4 py-3">
+                  {channel.source.protocol === "srt" ? (
+                    <SrtStatsPanel stats={channel.stats} compact />
+                  ) : (
+                    <span className="text-xs text-slate-600">—</span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 text-slate-400">
+                  {formatWhen(channel.created_at)}
+                </td>
                 <td className="px-4 py-3 text-right">
                   <ChannelActions
                     channel={channel}
                     busyId={busyId}
-                    onStart={(id) => void run(id, startChannel)}
-                    onStop={(id) => void run(id, stopChannel)}
+                    onConnect={(id) => void run(id, connectChannel)}
+                    onDisconnect={(id) => void run(id, disconnectChannel)}
+                    onRecord={(id) => void run(id, startRecording)}
+                    onStopRecord={(id) => void run(id, stopRecording)}
                   />
                 </td>
               </tr>

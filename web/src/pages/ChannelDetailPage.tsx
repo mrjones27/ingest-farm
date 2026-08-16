@@ -1,15 +1,34 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ApiError, getChannel, listAssets, startChannel, stopChannel } from "../api/client";
+import {
+  ApiError,
+  connectChannel,
+  disconnectChannel,
+  getChannel,
+  listAssets,
+  startRecording,
+  stopRecording,
+} from "../api/client";
+import { LiveThumb } from "../components/LiveThumb";
+import { SrtStatsPanel } from "../components/SrtStatsPanel";
 import { StatusBadge } from "../components/StatusBadge";
 import { usePoll } from "../hooks/usePoll";
 import { formatDuration, formatWhen } from "../lib/format";
-import { useState } from "react";
+
+const LIVE = new Set([
+  "connecting",
+  "connected",
+  "recording",
+  "starting",
+  "stopping",
+  "disconnecting",
+]);
 
 export function ChannelDetailPage() {
   const { channelId } = useParams();
   const { data: channel, error, reload } = usePoll(
     () => getChannel(channelId as string),
-    2000,
+    1000,
     channelId,
   );
   const { data: assets } = usePoll(
@@ -24,7 +43,12 @@ export function ChannelDetailPage() {
   if (error && !channel) return <p className="text-signal-err">{error}</p>;
   if (!channel) return <p className="text-slate-400">Loading…</p>;
 
+  const live = LIVE.has(channel.status);
   const recording = channel.status === "recording" || channel.status === "starting";
+  const canRecord =
+    channel.status === "connected" ||
+    channel.status === "connecting" ||
+    channel.status === "stopping";
 
   const run = async (fn: (id: string) => Promise<unknown>) => {
     setBusy(true);
@@ -51,17 +75,53 @@ export function ChannelDetailPage() {
             <StatusBadge status={channel.status} />
           </div>
         </div>
-        {recording ? (
-          <button className="btn-danger" disabled={busy} onClick={() => void run(stopChannel)}>
-            Stop recording
-          </button>
-        ) : (
-          <button className="btn-live" disabled={busy} onClick={() => void run(startChannel)}>
-            Start recording
-          </button>
-        )}
+        <div className="flex flex-wrap gap-2">
+          {!live ? (
+            <button className="btn-primary" disabled={busy} onClick={() => void run(connectChannel)}>
+              Connect
+            </button>
+          ) : (
+            <button
+              className="btn-ghost"
+              disabled={busy}
+              onClick={() => void run(disconnectChannel)}
+            >
+              Disconnect
+            </button>
+          )}
+          {recording ? (
+            <button className="btn-danger" disabled={busy} onClick={() => void run(stopRecording)}>
+              Stop recording
+            </button>
+          ) : (
+            <button
+              className="btn-live"
+              disabled={busy || !canRecord}
+              onClick={() => void run(startRecording)}
+            >
+              Record
+            </button>
+          )}
+        </div>
       </div>
       {actionError && <p className="text-sm text-signal-err">{actionError}</p>}
+
+      <section className="panel overflow-hidden">
+        <LiveThumb
+          url={channel.urls?.thumbnail}
+          alt={`${channel.name} live preview`}
+          className="aspect-video w-full max-h-80"
+        />
+      </section>
+
+      {channel.source.protocol === "srt" && live && (
+        <section className="panel p-4">
+          <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-slate-400">
+            SRT stats
+          </h2>
+          <SrtStatsPanel stats={channel.stats} />
+        </section>
+      )}
 
       <section className="panel grid gap-4 p-4 sm:grid-cols-2">
         <Field label="Protocol" value={channel.source.protocol} mono />
@@ -108,7 +168,9 @@ export function ChannelDetailPage() {
                       {asset.title}
                     </Link>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs">{formatDuration(asset.duration_ms)}</td>
+                  <td className="px-4 py-3 font-mono text-xs">
+                    {formatDuration(asset.duration_ms)}
+                  </td>
                   <td className="px-4 py-3 text-slate-400">{formatWhen(asset.created_at)}</td>
                 </tr>
               ))}

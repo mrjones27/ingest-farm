@@ -33,6 +33,9 @@ class PipelineBuilder:
         self._outputs: dict[PipelineProfile, OutputStage] = {
             PipelineProfile.TS_PASSTHROUGH: TsCaptureStage(),
         }
+        from ingest_farm.pipeline.stages.output.live_tee import LiveTeeStage
+
+        self._live_output = LiveTeeStage()
 
     def supported_protocols(self) -> list[str]:
         return [p.value for p in self._sources]
@@ -41,9 +44,18 @@ class PipelineBuilder:
         return [p.value for p in self._processing]
 
     def compose(self, config: ChannelConfig, ctx: dict[str, Any] | None = None):
+        """Legacy compose: always capture to disk (used by tests / capture_test)."""
+        return self._compose(config, ctx or {}, live=False)
+
+    def compose_live(self, config: ChannelConfig, ctx: dict[str, Any]) -> Any:
+        """Connect-mode compose: live tee with preview + gated record."""
+        if "preview_dir" not in ctx:
+            raise ValueError("compose_live requires ctx['preview_dir']")
+        return self._compose(config, ctx, live=True)
+
+    def _compose(self, config: ChannelConfig, ctx: dict[str, Any], *, live: bool):
         from gi.repository import Gst
 
-        ctx = ctx or {}
         profile = config.pipeline.profile
 
         source_stage = self._sources.get(config.source.protocol)
@@ -54,7 +66,7 @@ class PipelineBuilder:
         if processing_stage is None:
             raise ValueError(f"Unsupported pipeline profile: {profile}")
 
-        output_stage = self._outputs.get(profile)
+        output_stage = self._live_output if live else self._outputs.get(profile)
         if output_stage is None:
             raise ValueError(f"No output stage for profile: {profile}")
 

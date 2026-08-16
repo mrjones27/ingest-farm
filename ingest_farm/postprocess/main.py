@@ -144,10 +144,45 @@ class PostProcessWorker:
 
             master_path = segments[0]
             master_path_str = str(master_path)
+            wall_ms = None
+            if recording.started_at and recording.ended_at:
+                wall_ms = int(
+                    (recording.ended_at - recording.started_at).total_seconds() * 1000
+                )
             try:
                 metadata.update(discover_file(master_path_str))
             except Exception:
                 logger.warning("Could not discover metadata for %s", master_path_str)
+
+            discover_ms = metadata.get("duration_ms")
+            # Live MPEG-TS probe duration is unreliable; prefer recording wall clock.
+            if wall_ms is not None and wall_ms > 0:
+                metadata["discover_duration_ms"] = discover_ms
+                metadata["duration_ms"] = wall_ms
+                metadata["duration_source"] = "wall_clock"
+            elif discover_ms is not None:
+                metadata["duration_source"] = "discoverer"
+
+            # #region agent log
+            from ingest_farm.common.agent_debug import agent_log
+
+            agent_log(
+                "B",
+                "postprocess/main.py:_process",
+                "duration compare",
+                {
+                    "recording_id": recording_id,
+                    "wall_ms": wall_ms,
+                    "discover_ms": discover_ms,
+                    "chosen_ms": metadata.get("duration_ms"),
+                    "duration_source": metadata.get("duration_source"),
+                    "segment_count": len(segments),
+                    "segment_bytes": [p.stat().st_size for p in segments],
+                    "master": master_path_str,
+                },
+                run_id="post-fix",
+            )
+            # #endregion
 
             derived_dir = master_dir / "derived"
             proxy_path, thumbnail_path, media_meta = self._derive_media(master_path, derived_dir)

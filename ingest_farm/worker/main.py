@@ -5,12 +5,16 @@ import signal
 from datetime import datetime, timezone
 
 from ingest_farm.common.events import (
-    CHANNEL_START_QUEUE,
-    CHANNEL_STOP_QUEUE,
+    CHANNEL_CONNECT_QUEUE,
+    CHANNEL_DISCONNECT_QUEUE,
+    CHANNEL_RECORD_START_QUEUE,
+    CHANNEL_RECORD_STOP_QUEUE,
     POSTPROCESS_QUEUE,
     RECORDING_COMPLETE_QUEUE,
     blocking_pop,
+    clear_channel_stats,
     publish_event,
+    set_channel_stats,
     try_pop,
 )
 from ingest_farm.common.storage import LocalStorage
@@ -25,9 +29,18 @@ from ingest_farm.schemas import (
     SourceConfig,
     SourceProtocol,
 )
-from ingest_farm.worker.recorder import PipelineRecorder
+from ingest_farm.worker.recorder import ChannelSession
 
 logger = logging.getLogger(__name__)
+
+ACTIVE_STATUSES = (
+    "connecting",
+    "connected",
+    "recording",
+    "disconnecting",
+    "starting",
+    "stopping",
+)
 
 
 class IngestWorker:
@@ -35,28 +48,66 @@ class IngestWorker:
         self.settings = get_settings()
         self.worker_id = self.settings.resolved_worker_id
         self.storage = LocalStorage()
-        self._recorders: dict[str, PipelineRecorder] = {}
+        self._sessions: dict[str, ChannelSession] = {}
+        self._recording_ids: dict[str, str] = {}
+        self._pending_record: set[str] = set()
         self._running = True
+        self._loop = None
 
     def run(self) -> None:
+        import threading
+
+        from ingest_farm.common.gst_utils import init_gstreamer
+        from gi.repository import GLib
+
         init_db()
+        init_gstreamer()
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
         logger.info("Worker %s starting (capacity=%s)", self.worker_id, self.settings.worker_capacity)
         self._register_worker()
         self._reconcile_orphaned_channels()
+        self._loop = GLib.MainLoop()
 
-        while self._running:
+        def _connect_jobs() -> None:
+            while self._running:
+                job = blocking_pop(CHANNEL_CONNECT_QUEUE, timeout=1)
+                if job:
+                    GLib.idle_add(self._idle_connect, job)
+
+        threading.Thread(target=_connect_jobs, daemon=True, name="connect-jobs").start()
+        GLib.timeout_add_seconds(1, self._glib_tick)
+        self._loop.run()
+
+    def _idle_connect(self, job: dict) -> bool:
+        try:
+            self._handle_connect(job)
+        except Exception:
+            logger.exception("idle connect failed")
+        return False
+
+    def _glib_tick(self) -> bool:
+        if not self._running:
+            if self._loop is not None and self._loop.is_running():
+                self._loop.quit()
+            return False
+        try:
             self._heartbeat()
-            # Prefer draining stop requests so channels can end promptly.
-            stop_job = try_pop(CHANNEL_STOP_QUEUE)
-            while stop_job:
-                self._handle_stop(stop_job)
-                stop_job = try_pop(CHANNEL_STOP_QUEUE)
+            self._drain_control_queues()
+        except Exception:
+            logger.exception("worker tick failed")
+        return True
 
-            job = blocking_pop(CHANNEL_START_QUEUE, timeout=1)
-            if job:
-                self._handle_start(job)
+    def _drain_control_queues(self) -> None:
+        for queue, handler in (
+            (CHANNEL_DISCONNECT_QUEUE, self._handle_disconnect),
+            (CHANNEL_RECORD_STOP_QUEUE, self._handle_record_stop),
+            (CHANNEL_RECORD_START_QUEUE, self._handle_record_start),
+        ):
+            job = try_pop(queue)
+            while job:
+                handler(job)
+                job = try_pop(queue)
 
     def _register_worker(self) -> None:
         with get_session_factory()() as db:
@@ -65,20 +116,15 @@ class IngestWorker:
                 worker = Worker(hostname=self.worker_id, capacity=self.settings.worker_capacity)
                 db.add(worker)
             worker.last_heartbeat = datetime.now(timezone.utc)
-            worker.active_channels = list(self._recorders.keys())
+            worker.active_channels = list(self._sessions.keys())
             db.commit()
 
     def _reconcile_orphaned_channels(self) -> None:
-        """Clear channels left in starting/recording/stopping after a worker crash."""
         with get_session_factory()() as db:
-            orphans = (
-                db.query(Channel)
-                .filter(Channel.status.in_(("starting", "recording", "stopping")))
-                .all()
-            )
+            orphans = db.query(Channel).filter(Channel.status.in_(ACTIVE_STATUSES)).all()
             cleared: list[str] = []
             for channel in orphans:
-                if channel.id in self._recorders:
+                if channel.id in self._sessions:
                     continue
                 old = channel.status
                 channel.status = "idle"
@@ -101,19 +147,45 @@ class IngestWorker:
             worker = db.query(Worker).filter_by(hostname=self.worker_id).one_or_none()
             if worker:
                 worker.last_heartbeat = datetime.now(timezone.utc)
-                worker.active_channels = list(self._recorders.keys())
-                db.commit()
+                worker.active_channels = list(self._sessions.keys())
 
-    def _handle_start(self, job: dict) -> None:
+            for channel_id, session in list(self._sessions.items()):
+                if session.is_connected:
+                    stats = session.get_stats()
+                    if stats:
+                        try:
+                            set_channel_stats(channel_id, stats, ttl_sec=10)
+                        except Exception:
+                            logger.debug("Failed to publish stats for %s", channel_id, exc_info=True)
+                    continue
+                self._sessions.pop(channel_id, None)
+                self._recording_ids.pop(channel_id, None)
+                self._pending_record.discard(channel_id)
+                clear_channel_stats(channel_id)
+                ch = db.get(Channel, channel_id)
+                if ch and ch.status in ACTIVE_STATUSES:
+                    ch.status = "error"
+                    logger.warning("Channel %s session ended unexpectedly → error", channel_id)
+            db.commit()
+
+    def _handle_connect(self, job: dict) -> None:
         channel_id = job["channel_id"]
-        if channel_id in self._recorders:
-            logger.warning("Channel %s already recording on this worker", channel_id)
+        if channel_id in self._sessions and self._sessions[channel_id].is_connected:
+            logger.warning("Channel %s already connected", channel_id)
+            with get_session_factory()() as db:
+                ch = db.get(Channel, channel_id)
+                if ch and ch.status == "connecting":
+                    ch.status = "connected"
+                    db.commit()
+            if channel_id in self._pending_record:
+                self._handle_record_start({"channel_id": channel_id})
             return
-        if len(self._recorders) >= self.settings.worker_capacity:
+
+        if len(self._sessions) >= self.settings.worker_capacity:
             logger.warning("Worker at capacity, rejecting channel %s", channel_id)
             with get_session_factory()() as db:
                 ch = db.get(Channel, channel_id)
-                if ch and ch.status == "starting":
+                if ch and ch.status in {"connecting", "starting"}:
                     ch.status = "error"
                     db.commit()
             return
@@ -123,82 +195,159 @@ class IngestWorker:
             if channel is None:
                 logger.error("Channel %s not found", channel_id)
                 return
-
             config = self._channel_to_config(channel)
-            recorder = PipelineRecorder()
-            output_dir = self.storage.session_dir(channel_id, recorder.session_id)
+            start_record_after = channel.status == "starting"
 
+        session = ChannelSession()
+        preview_dir = self.storage.root / channel_id / "live"
+        try:
+            # #region agent log
+            from ingest_farm.common.agent_debug import agent_log
+
+            agent_log(
+                "A",
+                "worker/main.py:_handle_connect",
+                "connect requested",
+                {
+                    "channel_id": channel_id,
+                    "name": config.name,
+                    "uri": config.source.uri,
+                    "protocol": config.source.protocol,
+                },
+                run_id="obs-caller",
+            )
+            # #endregion
+            session.connect(config, preview_dir)
+            self._sessions[channel_id] = session
+            with get_session_factory()() as db:
+                ch = db.get(Channel, channel_id)
+                if ch and ch.status in {"connecting", "starting"}:
+                    # Keep "starting" if a record was requested; otherwise connected.
+                    if ch.status == "connecting":
+                        ch.status = "connected"
+                    db.commit()
+            logger.info("Connected channel %s", channel_id)
+            if start_record_after or channel_id in self._pending_record:
+                self._handle_record_start({"channel_id": channel_id})
+        except Exception:
+            logger.exception("Failed to connect channel %s", channel_id)
+            with get_session_factory()() as db:
+                ch = db.get(Channel, channel_id)
+                if ch:
+                    ch.status = "error"
+                    db.commit()
+
+    def _handle_disconnect(self, job: dict) -> None:
+        channel_id = job["channel_id"]
+        self._pending_record.discard(channel_id)
+        session = self._sessions.pop(channel_id, None)
+        if session is not None:
+            if session.is_recording:
+                self._finalize_recording(channel_id, session, completed=True)
+            session.disconnect()
+        clear_channel_stats(channel_id)
+        with get_session_factory()() as db:
+            channel = db.get(Channel, channel_id)
+            if channel and channel.status in ACTIVE_STATUSES:
+                channel.status = "idle"
+                db.commit()
+                logger.info("Disconnected channel %s → idle", channel_id)
+
+    def _handle_record_start(self, job: dict) -> None:
+        channel_id = job["channel_id"]
+        session = self._sessions.get(channel_id)
+        if session is None or not session.is_connected:
+            self._pending_record.add(channel_id)
+            logger.info("Record start pending until channel %s connects", channel_id)
+            return
+        if session.is_recording:
+            self._pending_record.discard(channel_id)
+            return
+
+        self._pending_record.discard(channel_id)
+        output_dir = self.storage.session_dir(channel_id, session.session_id)
+        with get_session_factory()() as db:
             recording = Recording(
                 channel_id=channel_id,
                 storage_path=str(output_dir),
                 status=RecordingStatus.RECORDING.value,
             )
             db.add(recording)
-            channel.status = "recording"
+            channel = db.get(Channel, channel_id)
+            if channel:
+                channel.status = "recording"
             db.commit()
-            recording_id = recording.id
+            self._recording_ids[channel_id] = recording.id
 
         try:
-            recorder.start(config, output_dir)
-            self._recorders[channel_id] = recorder
-            logger.info("Started recording %s for channel %s", recording_id, channel_id)
+            session.start_recording(output_dir)
+            logger.info("Recording started for channel %s", channel_id)
         except Exception:
-            logger.exception("Failed to start pipeline for channel %s", channel_id)
+            logger.exception("Failed to start recording for channel %s", channel_id)
             with get_session_factory()() as db:
-                rec = db.get(Recording, recording_id)
-                if rec:
-                    rec.status = RecordingStatus.FAILED.value
-                    rec.ended_at = datetime.now(timezone.utc)
+                rid = self._recording_ids.pop(channel_id, None)
+                if rid:
+                    rec = db.get(Recording, rid)
+                    if rec:
+                        rec.status = RecordingStatus.FAILED.value
+                        rec.ended_at = datetime.now(timezone.utc)
                 ch = db.get(Channel, channel_id)
                 if ch:
-                    ch.status = "error"
+                    ch.status = "connected" if session.is_connected else "error"
                 db.commit()
 
-    def _handle_stop(self, job: dict) -> None:
+    def _handle_record_stop(self, job: dict) -> None:
         channel_id = job["channel_id"]
-        recorder = self._recorders.pop(channel_id, None)
-        if recorder is None:
-            # Worker crash / orphaned stop job — still clear sticky "stopping".
+        self._pending_record.discard(channel_id)
+        session = self._sessions.get(channel_id)
+        if session is None:
             with get_session_factory()() as db:
                 channel = db.get(Channel, channel_id)
-                if channel and channel.status in {"stopping", "starting", "recording"}:
+                if channel and channel.status in {"stopping", "recording", "starting"}:
                     channel.status = "idle"
-                    recording = (
-                        db.query(Recording)
-                        .filter_by(channel_id=channel_id, status=RecordingStatus.RECORDING.value)
-                        .order_by(Recording.started_at.desc())
-                        .first()
-                    )
-                    if recording:
-                        recording.status = RecordingStatus.FAILED.value
-                        recording.ended_at = datetime.now(timezone.utc)
                     db.commit()
-                    logger.warning(
-                        "Cleared orphaned channel %s → idle (no local recorder)", channel_id
-                    )
             return
 
-        recorder.stop()
-        output_dir = recorder.output_dir
-        segment_count = recorder.segment_count
-        byte_size = self.storage.total_size(output_dir) if output_dir else 0
-
+        self._finalize_recording(channel_id, session, completed=True)
         with get_session_factory()() as db:
             channel = db.get(Channel, channel_id)
             if channel:
-                channel.status = "idle"
-            recording = (
-                db.query(Recording)
-                .filter_by(channel_id=channel_id, status=RecordingStatus.RECORDING.value)
-                .order_by(Recording.started_at.desc())
-                .first()
-            )
-            if recording:
-                recording.status = RecordingStatus.COMPLETED.value
-                recording.ended_at = datetime.now(timezone.utc)
-                recording.segment_count = segment_count
-                recording.byte_size = byte_size
+                channel.status = "connected" if session.is_connected else "idle"
                 db.commit()
+
+    def _finalize_recording(
+        self, channel_id: str, session: ChannelSession, *, completed: bool
+    ) -> None:
+        if not session.is_recording and channel_id not in self._recording_ids:
+            return
+        if session.is_recording:
+            session.stop_recording()
+        output_dir = session.output_dir
+        segment_count = session.segment_count
+        byte_size = self.storage.total_size(output_dir) if output_dir else 0
+        recording_id = self._recording_ids.pop(channel_id, None)
+
+        with get_session_factory()() as db:
+            recording = None
+            if recording_id:
+                recording = db.get(Recording, recording_id)
+            if recording is None:
+                recording = (
+                    db.query(Recording)
+                    .filter_by(channel_id=channel_id, status=RecordingStatus.RECORDING.value)
+                    .order_by(Recording.started_at.desc())
+                    .first()
+                )
+            if recording is None:
+                return
+            recording.status = (
+                RecordingStatus.COMPLETED.value if completed else RecordingStatus.FAILED.value
+            )
+            recording.ended_at = datetime.now(timezone.utc)
+            recording.segment_count = segment_count
+            recording.byte_size = byte_size
+            db.commit()
+            if completed:
                 publish_event(
                     RECORDING_COMPLETE_QUEUE,
                     {"recording_id": recording.id, "channel_id": channel_id},
@@ -207,8 +356,6 @@ class IngestWorker:
                     POSTPROCESS_QUEUE,
                     {"recording_id": recording.id, "channel_id": channel_id},
                 )
-            else:
-                db.commit()
 
     def _channel_to_config(self, channel: Channel) -> ChannelConfig:
         profile = channel.pipeline_profile or {}
@@ -225,7 +372,11 @@ class IngestWorker:
         )
 
     def _shutdown(self, *_args) -> None:
+        from gi.repository import GLib
+
         logger.info("Shutting down worker")
         self._running = False
-        for channel_id in list(self._recorders):
-            self._handle_stop({"channel_id": channel_id})
+        for channel_id in list(self._sessions):
+            self._handle_disconnect({"channel_id": channel_id})
+        if self._loop is not None and self._loop.is_running():
+            GLib.idle_add(self._loop.quit)

@@ -64,10 +64,108 @@ def test_create_and_list_channel(client: TestClient) -> None:
     assert body["name"] == "srt-test"
     assert body["pipeline"]["profile"] == "ts_passthrough"
     assert body["status"] == "idle"
+    assert body["urls"]["thumbnail"] is None
 
     listed = client.get("/api/channels")
     assert listed.status_code == 200
     assert len(listed.json()) == 1
+
+
+def test_connect_and_record_endpoints(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ingest_farm.api import main as api_main
+
+    calls: list[str] = []
+
+    def _track(name: str):
+        def _fn(db, channel_id: str) -> None:  # noqa: ANN001
+            calls.append(f"{name}:{channel_id}")
+            channel = db.get(api_main.Channel, channel_id)
+            status_map = {
+                "connect": "connecting",
+                "disconnect": "disconnecting",
+                "record_start": "starting",
+                "record_stop": "stopping",
+            }
+            channel.status = status_map[name]
+            db.commit()
+
+        return _fn
+
+    monkeypatch.setattr(api_main.scheduler, "connect_channel", _track("connect"))
+    monkeypatch.setattr(api_main.scheduler, "disconnect_channel", _track("disconnect"))
+    monkeypatch.setattr(api_main.scheduler, "start_recording", _track("record_start"))
+    monkeypatch.setattr(api_main.scheduler, "stop_recording", _track("record_stop"))
+
+    created = client.post(
+        "/api/channels",
+        json={
+            "name": "live-split",
+            "source": {"protocol": "srt", "uri": "srt://0.0.0.0:9100?mode=listener"},
+            "pipeline": {"profile": "ts_passthrough", "segment_duration_sec": 3600},
+        },
+    )
+    assert created.status_code == 200
+    channel_id = created.json()["id"]
+
+    connected = client.post(f"/api/channels/{channel_id}/connect")
+    assert connected.status_code == 200
+    assert connected.json()["status"] == "connecting"
+    assert connected.json()["urls"]["thumbnail"] == f"/api/channels/{channel_id}/thumbnail"
+
+    recording = client.post(f"/api/channels/{channel_id}/record/start")
+    assert recording.status_code == 200
+    assert recording.json()["status"] == "starting"
+
+    stopped = client.post(f"/api/channels/{channel_id}/record/stop")
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "stopping"
+
+    disconnected = client.post(f"/api/channels/{channel_id}/disconnect")
+    assert disconnected.status_code == 200
+    assert disconnected.json()["status"] == "disconnecting"
+
+    assert calls == [
+        f"connect:{channel_id}",
+        f"record_start:{channel_id}",
+        f"record_stop:{channel_id}",
+        f"disconnect:{channel_id}",
+    ]
+
+
+def test_channel_thumbnail_requires_live(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ingest_farm.api import main as api_main
+    from ingest_farm.config import get_settings
+    from ingest_farm.models import Channel
+
+    created = client.post(
+        "/api/channels",
+        json={
+            "name": "thumb-ch",
+            "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5001"},
+        },
+    )
+    channel_id = created.json()["id"]
+    assert client.get(f"/api/channels/{channel_id}/thumbnail").status_code == 404
+
+    monkeypatch.setattr(get_settings(), "storage_root", tmp_path)
+
+    def _connect(db, channel_id: str) -> None:  # noqa: ANN001
+        ch = db.get(Channel, channel_id)
+        ch.status = "connected"
+        db.commit()
+
+    monkeypatch.setattr(api_main.scheduler, "connect_channel", _connect)
+    client.post(f"/api/channels/{channel_id}/connect")
+
+    thumb = tmp_path / channel_id / "live" / "thumb.jpg"
+    thumb.parent.mkdir(parents=True)
+    thumb.write_bytes(b"\xff\xd8\xff" + b"\x00" * 200)
+
+    resp = client.get(f"/api/channels/{channel_id}/thumbnail")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/jpeg")
 
 
 def test_spa_does_not_shadow_api(client: TestClient) -> None:

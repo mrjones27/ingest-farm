@@ -1,5 +1,8 @@
 const TONE: Record<string, string> = {
   recording: "bg-signal-live/15 text-signal-live ring-signal-live/40",
+  connected: "bg-sky-500/15 text-sky-300 ring-sky-500/40",
+  connecting: "bg-signal-warn/15 text-signal-warn ring-signal-warn/40",
+  disconnecting: "bg-signal-warn/15 text-signal-warn ring-signal-warn/40",
   starting: "bg-signal-warn/15 text-signal-warn ring-signal-warn/40",
   stopping: "bg-signal-warn/15 text-signal-warn ring-signal-warn/40",
   error: "bg-signal-err/15 text-signal-err ring-signal-err/40",

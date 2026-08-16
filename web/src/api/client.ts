@@ -53,12 +53,38 @@ export function createChannel(payload: ChannelCreate): Promise<Channel> {
   });
 }
 
+export function connectChannel(id: string): Promise<Channel> {
+  return request<Channel>(`/api/channels/${id}/connect`, { method: "POST" });
+}
+
+export function disconnectChannel(id: string): Promise<Channel> {
+  return request<Channel>(`/api/channels/${id}/disconnect`, { method: "POST" });
+}
+
+export function startRecording(id: string): Promise<Channel> {
+  return request<Channel>(`/api/channels/${id}/record/start`, { method: "POST" });
+}
+
+export function stopRecording(id: string): Promise<Channel> {
+  return request<Channel>(`/api/channels/${id}/record/stop`, { method: "POST" });
+}
+
+/** @deprecated Prefer connect + startRecording */
 export function startChannel(id: string): Promise<Channel> {
   return request<Channel>(`/api/channels/${id}/start`, { method: "POST" });
 }
 
+/** @deprecated Prefer stopRecording (keeps connection) or disconnectChannel */
 export function stopChannel(id: string): Promise<Channel> {
   return request<Channel>(`/api/channels/${id}/stop`, { method: "POST" });
+}
+
+export function getChannelStats(id: string): Promise<{
+  channel_id: string;
+  status: string;
+  stats: Record<string, unknown>;
+}> {
+  return request(`/api/channels/${id}/stats`);
 }
 
 export function listAssets(params: AssetListParams = {}): Promise<Asset[]> {

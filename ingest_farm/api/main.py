@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session, contains_eager, joinedload
 
-from ingest_farm.common.events import get_redis
+from ingest_farm.common.events import get_channel_stats, get_redis
 from ingest_farm.db import get_db, get_engine
 from ingest_farm.models import Asset, Channel, Recording, Worker
 from ingest_farm.orchestrator.scheduler import Scheduler
@@ -60,9 +60,36 @@ def _mount_spa(app: FastAPI) -> None:
         return _spa_file(full_path)
 
 
+def _channel_urls(channel: Channel) -> dict[str, str | None]:
+    live = channel.status in {
+        "connected",
+        "recording",
+        "connecting",
+        "starting",
+        "stopping",
+        "disconnecting",
+    }
+    return {
+        "thumbnail": f"/api/channels/{channel.id}/thumbnail" if live else None,
+    }
+
+
 def _channel_response(channel: Channel) -> ChannelResponse:
     profile = channel.pipeline_profile or {}
     output = channel.output_config or {}
+    stats = None
+    if channel.status in {
+        "connected",
+        "recording",
+        "connecting",
+        "starting",
+        "stopping",
+        "disconnecting",
+    }:
+        try:
+            stats = get_channel_stats(channel.id)
+        except Exception:
+            stats = None
     return ChannelResponse(
         id=channel.id,
         name=channel.name,
@@ -76,6 +103,8 @@ def _channel_response(channel: Channel) -> ChannelResponse:
         enabled=channel.enabled,
         status=channel.status,
         created_at=channel.created_at,
+        urls=_channel_urls(channel),
+        stats=stats,
     )
 
 
@@ -185,13 +214,126 @@ def get_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelRespon
     return _channel_response(channel)
 
 
-@router.post("/channels/{channel_id}/start", response_model=ChannelResponse)
-def start_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
+@router.post("/channels/{channel_id}/connect", response_model=ChannelResponse)
+def connect_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
     channel = db.get(Channel, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
     try:
-        scheduler.start_channel(db, channel_id)
+        scheduler.connect_channel(db, channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.refresh(channel)
+    return _channel_response(channel)
+
+
+@router.post("/channels/{channel_id}/disconnect", response_model=ChannelResponse)
+def disconnect_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        scheduler.disconnect_channel(db, channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.refresh(channel)
+    return _channel_response(channel)
+
+
+@router.post("/channels/{channel_id}/record/start", response_model=ChannelResponse)
+def record_start(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        scheduler.start_recording(db, channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.refresh(channel)
+    return _channel_response(channel)
+
+
+@router.post("/channels/{channel_id}/record/stop", response_model=ChannelResponse)
+def record_stop(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        scheduler.stop_recording(db, channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.refresh(channel)
+    return _channel_response(channel)
+
+
+@router.get("/channels/{channel_id}/thumbnail")
+def channel_thumbnail(channel_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    from ingest_farm.config import get_settings
+
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.status not in {
+        "connected",
+        "recording",
+        "connecting",
+        "starting",
+        "stopping",
+    }:
+        raise HTTPException(status_code=404, detail="Channel not live")
+    path = get_settings().storage_root / channel_id / "live" / "thumb.jpg"
+    stable = path.with_name("thumb.ok.jpg")
+    serve = path if path.is_file() and path.stat().st_size >= 100 else None
+    if serve is None and stable.is_file() and stable.stat().st_size >= 100:
+        serve = stable
+    # #region agent log
+    from ingest_farm.common.agent_debug import agent_log
+
+    agent_log(
+        "G",
+        "api/main.py:channel_thumbnail",
+        "thumb request",
+        {
+            "channel_id": channel_id,
+            "status": channel.status,
+            "exists": path.is_file(),
+            "bytes": path.stat().st_size if path.is_file() else 0,
+            "mtime": path.stat().st_mtime if path.is_file() else None,
+            "serving": serve.name if serve is not None else None,
+        },
+        run_id="post-fix",
+    )
+    # #endregion
+    if serve is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not ready")
+    return FileResponse(
+        serve,
+        media_type="image/jpeg",
+        filename="thumb.jpg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/channels/{channel_id}/stats")
+def channel_stats(channel_id: str, db: Session = Depends(get_db)) -> dict:
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        stats = get_channel_stats(channel_id) or {}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Stats unavailable: {exc}") from exc
+    return {"channel_id": channel_id, "status": channel.status, "stats": stats}
+
+
+@router.post("/channels/{channel_id}/start", response_model=ChannelResponse)
+def start_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
+    """Legacy: connect (if needed) and start recording."""
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        scheduler.start_recording(db, channel_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.refresh(channel)
@@ -200,11 +342,12 @@ def start_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResp
 
 @router.post("/channels/{channel_id}/stop", response_model=ChannelResponse)
 def stop_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
+    """Legacy: stop recording (stays connected if session is up)."""
     channel = db.get(Channel, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
     try:
-        scheduler.stop_channel(db, channel_id)
+        scheduler.stop_recording(db, channel_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.refresh(channel)

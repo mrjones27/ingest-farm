@@ -28,6 +28,10 @@ export interface Channel {
   enabled: boolean;
   status: string;
   created_at: string;
+  urls: {
+    thumbnail?: string | null;
+  };
+  stats?: Record<string, unknown> | null;
 }
 
 export interface ChannelCreate {
