@@ -122,8 +122,22 @@ class IngestWorker:
             db.commit()
 
     def _reconcile_orphaned_channels(self) -> None:
+        """Reset channels this worker previously claimed but no longer holds.
+
+        Single-worker mode: only touch IDs listed on this hostname's Worker row
+        so a restart does not clobber foreign workers if multiple are present.
+        """
         with get_session_factory()() as db:
-            orphans = db.query(Channel).filter(Channel.status.in_(ACTIVE_STATUSES)).all()
+            worker = db.query(Worker).filter_by(hostname=self.worker_id).one_or_none()
+            claimed = set(worker.active_channels or []) if worker else set()
+            if not claimed:
+                return
+
+            orphans = (
+                db.query(Channel)
+                .filter(Channel.id.in_(claimed), Channel.status.in_(ACTIVE_STATUSES))
+                .all()
+            )
             cleared: list[str] = []
             for channel in orphans:
                 if channel.id in self._sessions:
@@ -140,9 +154,15 @@ class IngestWorker:
                 if recording:
                     recording.status = RecordingStatus.FAILED.value
                     recording.ended_at = datetime.now(timezone.utc)
+            if worker is not None:
+                worker.active_channels = [
+                    cid for cid in (worker.active_channels or []) if cid in self._sessions
+                ]
             if cleared:
                 db.commit()
                 logger.warning("Reconciled orphaned channels → idle: %s", cleared)
+            elif worker is not None:
+                db.commit()
 
     def _heartbeat(self) -> None:
         with get_session_factory()() as db:
@@ -203,22 +223,6 @@ class IngestWorker:
         session = ChannelSession()
         preview_dir = self.storage.root / channel_id / "live"
         try:
-            # #region agent log
-            from ingest_farm.common.agent_debug import agent_log
-
-            agent_log(
-                "A",
-                "worker/main.py:_handle_connect",
-                "connect requested",
-                {
-                    "channel_id": channel_id,
-                    "name": config.name,
-                    "uri": config.source.uri,
-                    "protocol": config.source.protocol,
-                },
-                run_id="obs-caller",
-            )
-            # #endregion
             session.connect(config, preview_dir)
             self._sessions[channel_id] = session
             with get_session_factory()() as db:
@@ -360,7 +364,9 @@ class IngestWorker:
                 )
 
     def _channel_to_config(self, channel: Channel) -> ChannelConfig:
-        profile = channel.pipeline_profile or {}
+        profile = dict(channel.pipeline_profile or {})
+        if profile.get("profile") == "transcode_remux":
+            profile["profile"] = "ts_passthrough"
         output = channel.output_config or {}
         return ChannelConfig(
             name=channel.name,

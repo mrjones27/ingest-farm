@@ -15,9 +15,12 @@ Channel config selects a **pipeline profile**:
 | Profile | Behavior |
 |---------|----------|
 | `ts_passthrough` | Raw MPEG-TS capture — no demux, no re-encode |
-| `transcode_remux` | Future — demux essences, optional frame-rate convert, swappable encoders, remux |
+
+`transcode_remux` is not supported yet and is rejected by the API.
 
 Encoders register via `EncoderRegistry` (`gstreamer:x264enc`, `mainconcept:h264`, `insync`, etc.).
+
+**Deployment note:** the control plane is validated for a **single ingest worker**. Multi-worker farm routing is future work.
 
 ## Prerequisites
 
@@ -78,6 +81,8 @@ python -m venv .venv
 source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -e .
 cp .env.example .env
+# GStreamer/SRT knobs live in .env (GST_SRT_LATENCY_MS, queues, thumbs, HLS proxy).
+# Schema is applied via Alembic on API/worker/postprocess startup (upgrade head)
 
 python scripts/run_api.py
 python scripts/run_worker.py       # needs GStreamer
@@ -143,9 +148,9 @@ Publish the listen port on the worker (see `docker-compose.yml`, e.g. `5001:5001
 
 Caller (OBS / ffmpeg / gst): `srt://127.0.0.1:5001` (or `srt://worker:5001` from another compose service).
 
-**Implementation note (gst 1.24 / libsrt):** an in-process `compose_live` SRT listener aborts the worker when a caller connects. SRT sessions therefore run in a **child process** (`ingest_farm.worker.srt_session_proc`) with a parse_launch graph:
+**Implementation note (gst 1.24 / libsrt):** an in-process `compose_live` SRT listener aborts the worker when a caller connects. SRT sessions therefore run in a **child process** (`ingest_farm.worker.srt_session_proc`) built with `ElementFactory` (no URI interpolation into `parse_launch`):
 
-`srtsrc` (`keep-listening=true`, `authentication=false`) → leaky queue → tee → preview fakesink + valve-gated record branch.
+`srtsrc` (`keep-listening=true`) → leaky queue → tee → JPEG preview branch (or fakesink fallback) + valve-gated record branch.
 
 Do not call `srtsrc.get_property("stats")` or `bus.add_signal_watch()` on the live SRT path — both have aborted libsrt on this stack. Receiving state is inferred from buffer probes in the child.
 
@@ -179,5 +184,6 @@ scripts/
 - [ ] `transcode_remux` profile — demux, encoder registry, remux (MKV/MXF)
 - [ ] External SDK adapters — MainConcept, Insync
 - [ ] Audio track in HLS proxy
-- [ ] Live JPEG preview restored for SRT listener path
+- [ ] Multi-worker farm job routing
+- [ ] Full libsrt stats on the SRT child path
 - [ ] Archive tiers / approval workflow

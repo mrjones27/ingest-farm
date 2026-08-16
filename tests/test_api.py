@@ -187,3 +187,31 @@ def test_spa_does_not_shadow_api(client: TestClient) -> None:
         assert "text/html" in root.headers["content-type"]
     else:
         assert client.get("/").status_code == 404
+
+
+def test_assets_search_returns_200(client: TestClient) -> None:
+    response = client.get("/api/assets/search?q=abc")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_uri_injection_rejected(client: TestClient) -> None:
+    payload = {
+        "name": "evil",
+        "source": {
+            "protocol": "srt",
+            "uri": 'srt://0.0.0.0:9000?mode=listener" ! fakesink name=x',
+        },
+    }
+    response = client.post("/api/channels", json=payload)
+    assert response.status_code == 422
+
+
+def test_transcode_remux_rejected(client: TestClient) -> None:
+    payload = {
+        "name": "tx-reject",
+        "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5000"},
+        "pipeline": {"profile": "transcode_remux"},
+    }
+    response = client.post("/api/channels", json=payload)
+    assert response.status_code == 422

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SourceProtocol(str, Enum):
@@ -18,7 +18,42 @@ class SourceProtocol(str, Enum):
 
 class PipelineProfile(str, Enum):
     TS_PASSTHROUGH = "ts_passthrough"
-    TRANSCODE_REMUX = "transcode_remux"
+
+
+_URI_SCHEMES: dict[SourceProtocol, set[str]] = {
+    SourceProtocol.SRT: {"srt"},
+    SourceProtocol.UDP: {"udp"},
+    SourceProtocol.RTMP: {"rtmp", "rtmps"},
+    SourceProtocol.HLS: {"http", "https"},
+    SourceProtocol.FILE: {"file", ""},
+}
+
+
+def _validate_source_uri(protocol: SourceProtocol, uri: str) -> str:
+    uri = uri.strip()
+    if not uri:
+        raise ValueError("uri must not be empty")
+    # Reject GStreamer parse_launch injection characters.
+    if '"' in uri or "!" in uri or "\n" in uri or "\r" in uri:
+        raise ValueError('uri must not contain ", !, or newlines')
+    if "://" in uri:
+        scheme = uri.split("://", 1)[0].lower()
+    else:
+        scheme = ""
+        if protocol == SourceProtocol.FILE:
+            pass
+        elif protocol == SourceProtocol.SRT and not uri.startswith("srt://"):
+            uri = f"srt://{uri}"
+            scheme = "srt"
+        elif protocol == SourceProtocol.UDP and not uri.startswith("udp://"):
+            uri = f"udp://{uri}"
+            scheme = "udp"
+    allowed = _URI_SCHEMES.get(protocol, set())
+    if scheme not in allowed:
+        raise ValueError(
+            f"uri scheme '{scheme or '(none)'}' is not valid for protocol {protocol.value}"
+        )
+    return uri
 
 
 class SourceConfig(BaseModel):
@@ -26,12 +61,36 @@ class SourceConfig(BaseModel):
     uri: str
     config: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("uri")
+    @classmethod
+    def _uri_no_injection(cls, value: str) -> str:
+        if not value or not str(value).strip():
+            raise ValueError("uri must not be empty")
+        raw = str(value).strip()
+        if '"' in raw or "!" in raw or "\n" in raw or "\r" in raw:
+            raise ValueError('uri must not contain ", !, or newlines')
+        return raw
+
+    def model_post_init(self, __context: Any) -> None:
+        object.__setattr__(self, "uri", _validate_source_uri(self.protocol, self.uri))
+
 
 class PipelineConfig(BaseModel):
     profile: PipelineProfile = PipelineProfile.TS_PASSTHROUGH
     segment_duration_sec: int = 3600
     video: dict[str, Any] = Field(default_factory=dict)
     audio: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("profile", mode="before")
+    @classmethod
+    def _reject_unimplemented_profiles(cls, value: Any) -> Any:
+        if value == "transcode_remux" or (
+            isinstance(value, str) and value.lower() == "transcode_remux"
+        ):
+            raise ValueError(
+                "pipeline profile 'transcode_remux' is not supported; use 'ts_passthrough'"
+            )
+        return value
 
 
 class OutputConfig(BaseModel):

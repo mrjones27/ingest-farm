@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ingest_farm.config import get_settings
 from ingest_farm.pipeline.stages.base import OutputStage
 from ingest_farm.schemas import ChannelConfig
 
@@ -22,9 +23,7 @@ class TsCaptureStage(OutputStage):
         if tsparse is None or sink is None:
             raise RuntimeError("tsparse/multifilesink GStreamer elements not available")
 
-        tsparse.set_property("set-timestamps", True)
-        if tsparse.find_property("alignment"):
-            tsparse.set_property("alignment", 7)
+        get_settings().configure_tsparse(tsparse)
 
         output_dir = Path(ctx["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)

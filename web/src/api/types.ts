@@ -1,5 +1,5 @@
 export type SourceProtocol = "srt" | "udp" | "rtmp" | "hls" | "file";
-export type PipelineProfile = "ts_passthrough" | "transcode_remux";
+export type PipelineProfile = "ts_passthrough";
 
 export interface SourceConfig {
   protocol: SourceProtocol;

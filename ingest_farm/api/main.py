@@ -60,7 +60,7 @@ def _mount_spa(app: FastAPI) -> None:
         return _spa_file(full_path)
 
 
-def _channel_urls(channel: Channel) -> dict[str, str | None]:
+def _channel_urls(channel: Channel, stats: dict | None = None) -> dict[str, str | None]:
     live = channel.status in {
         "connected",
         "recording",
@@ -69,9 +69,20 @@ def _channel_urls(channel: Channel) -> dict[str, str | None]:
         "stopping",
         "disconnecting",
     }
+    # Don't advertise thumbnail when SRT child fell back to fakesink preview.
+    preview = (stats or {}).get("preview")
+    if channel.protocol == "srt" and preview == "fakesink":
+        return {"thumbnail": None}
     return {
         "thumbnail": f"/api/channels/{channel.id}/thumbnail" if live else None,
     }
+
+
+def _pipeline_from_db(profile: dict | None) -> PipelineConfig:
+    data = dict(profile or {})
+    if data.get("profile") == "transcode_remux":
+        data["profile"] = "ts_passthrough"
+    return PipelineConfig(**data)
 
 
 def _channel_response(channel: Channel) -> ChannelResponse:
@@ -98,12 +109,12 @@ def _channel_response(channel: Channel) -> ChannelResponse:
             uri=channel.source_uri,
             config=channel.source_config or {},
         ),
-        pipeline=PipelineConfig(**profile),
+        pipeline=_pipeline_from_db(profile),
         output=OutputConfig(**output),
         enabled=channel.enabled,
         status=channel.status,
         created_at=channel.created_at,
-        urls=_channel_urls(channel),
+        urls=_channel_urls(channel, stats),
         stats=stats,
     )
 
@@ -286,24 +297,6 @@ def channel_thumbnail(channel_id: str, db: Session = Depends(get_db)) -> FileRes
     serve = path if path.is_file() and path.stat().st_size >= 100 else None
     if serve is None and stable.is_file() and stable.stat().st_size >= 100:
         serve = stable
-    # #region agent log
-    from ingest_farm.common.agent_debug import agent_log
-
-    agent_log(
-        "G",
-        "api/main.py:channel_thumbnail",
-        "thumb request",
-        {
-            "channel_id": channel_id,
-            "status": channel.status,
-            "exists": path.is_file(),
-            "bytes": path.stat().st_size if path.is_file() else 0,
-            "mtime": path.stat().st_mtime if path.is_file() else None,
-            "serving": serve.name if serve is not None else None,
-        },
-        run_id="post-fix",
-    )
-    # #endregion
     if serve is None:
         raise HTTPException(status_code=404, detail="Thumbnail not ready")
     return FileResponse(
@@ -354,14 +347,14 @@ def stop_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelRespo
     return _channel_response(channel)
 
 
-@router.get("/assets", response_model=list[AssetResponse])
-def list_assets(
-    q: str | None = Query(default=None),
-    channel_id: str | None = Query(default=None),
-    created_after: datetime | None = Query(default=None),
-    created_before: datetime | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
+def _query_assets(
+    db: Session,
+    *,
+    q: str | None = None,
+    channel_id: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+    limit: int = 100,
 ) -> list[AssetResponse]:
     query = (
         db.query(Asset)
@@ -381,12 +374,31 @@ def list_assets(
     return [_asset_response(a) for a in query.limit(limit).all()]
 
 
+@router.get("/assets", response_model=list[AssetResponse])
+def list_assets(
+    q: str | None = Query(default=None),
+    channel_id: str | None = Query(default=None),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[AssetResponse]:
+    return _query_assets(
+        db,
+        q=q,
+        channel_id=channel_id,
+        created_after=created_after,
+        created_before=created_before,
+        limit=limit,
+    )
+
+
 @router.get("/assets/search", response_model=list[AssetResponse])
 def search_assets(
     q: str = Query(...),
     db: Session = Depends(get_db),
 ) -> list[AssetResponse]:
-    return list_assets(q=q, db=db)
+    return _query_assets(db, q=q)
 
 
 @router.get("/assets/{asset_id}", response_model=AssetResponse)
@@ -434,15 +446,11 @@ def get_proxy_file(asset_id: str, file_path: str, db: Session = Depends(get_db))
     target = _safe_under(proxy_root, proxy_root / file_path)
 
     if target.suffix == ".m3u8":
+        from ingest_farm.postprocess.proxy import rewrite_proxy_playlist
+
         text_body = target.read_text(encoding="utf-8")
-        rewritten = []
-        for line in text_body.splitlines():
-            if line and not line.startswith("#") and not line.startswith("http"):
-                rewritten.append(f"/api/assets/{asset_id}/proxy/{line.strip()}")
-            else:
-                rewritten.append(line)
         return PlainTextResponse(
-            "\n".join(rewritten) + "\n",
+            rewrite_proxy_playlist(text_body, asset_id),
             media_type="application/vnd.apple.mpegurl",
         )
 

@@ -17,7 +17,12 @@ export function HlsPlayer({ src }: { src: string }) {
     }
 
     if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true });
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+      });
       hls.loadSource(src);
       hls.attachMedia(video);
       return () => {

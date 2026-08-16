@@ -17,6 +17,8 @@ CHANNEL_STOP_QUEUE = CHANNEL_RECORD_STOP_QUEUE
 RECORDING_COMPLETE_QUEUE = "ingest:events:recording_complete"
 POSTPROCESS_QUEUE = "ingest:jobs:postprocess"
 
+_redis_clients: dict[tuple[str, float | None], redis.Redis] = {}
+
 
 def channel_stats_key(channel_id: str) -> str:
     return f"ingest:channel:{channel_id}:stats"
@@ -45,12 +47,18 @@ def clear_channel_stats(channel_id: str) -> None:
 def get_redis(*, socket_timeout: float | None = None) -> redis.Redis:
     # Blocking pops need socket_timeout=None (or > BRPOP timeout).
     # Health checks should pass a short timeout to avoid hanging.
-    return redis.from_url(
-        get_settings().redis_url,
-        decode_responses=True,
-        socket_timeout=socket_timeout,
-        socket_connect_timeout=5,
-    )
+    settings = get_settings()
+    key = (settings.redis_url, socket_timeout)
+    client = _redis_clients.get(key)
+    if client is None:
+        client = redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_timeout=socket_timeout,
+            socket_connect_timeout=5,
+        )
+        _redis_clients[key] = client
+    return client
 
 
 def publish_event(queue: str, payload: dict[str, Any]) -> None:

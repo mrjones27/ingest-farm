@@ -26,6 +26,8 @@ COPY pyproject.toml README.md ./
 COPY ingest_farm ./ingest_farm
 COPY scripts ./scripts
 COPY configs ./configs
+COPY alembic ./alembic
+COPY alembic.ini ./
 
 RUN python3 -m venv --system-site-packages /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -e .

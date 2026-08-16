@@ -9,15 +9,18 @@ logger = logging.getLogger(__name__)
 
 
 def init_gstreamer(plugin_path: str = "") -> None:
+    import os
+
     import gi
 
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst
 
-    if plugin_path:
-        import os
+    from ingest_farm.config import get_settings
 
-        os.environ.setdefault("GST_PLUGIN_PATH", plugin_path)
+    path = plugin_path or get_settings().gst_plugin_path
+    if path:
+        os.environ.setdefault("GST_PLUGIN_PATH", path)
     Gst.init(None)
 
 
@@ -32,19 +35,28 @@ def run_pipeline_string(description: str, timeout_sec: float = 120.0) -> None:
     pipeline = Gst.parse_launch(description)
     if pipeline is None:
         raise RuntimeError(f"Failed to parse pipeline: {description}")
+    run_gst_pipeline(pipeline, timeout_sec=timeout_sec)
+
+
+def run_gst_pipeline(pipeline: Any, timeout_sec: float = 120.0) -> None:
+    """Run an already-built pipeline to EOS or error."""
+    import gi
+
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
 
     bus = pipeline.get_bus()
     ret = pipeline.set_state(Gst.State.PLAYING)
     if ret == Gst.StateChangeReturn.FAILURE:
         pipeline.set_state(Gst.State.NULL)
-        raise RuntimeError(f"Failed to start pipeline: {description}")
+        raise RuntimeError("Failed to start pipeline")
 
     deadline = time.time() + timeout_sec
     try:
         while time.time() < deadline:
             msg = bus.timed_pop_filtered(
                 500 * Gst.MSECOND,
-                Gst.MessageType.ERROR | Gst.MessageType.EOS | Gst.MessageType.ELEMENT,
+                Gst.MessageType.ERROR | Gst.MessageType.EOS,
             )
             if msg is None:
                 continue
@@ -67,11 +79,17 @@ def discover_file(path: str) -> dict[str, Any]:
     gi.require_version("GstPbutils", "1.0")
     from gi.repository import Gst, GstPbutils
 
+    from ingest_farm.config import get_settings
+
     Gst.init(None)
-    discoverer = GstPbutils.Discoverer.new(5 * Gst.SECOND)
+    timeout_ns = max(1, int(get_settings().gst_discoverer_timeout_sec)) * Gst.SECOND
+    discoverer = GstPbutils.Discoverer.new(timeout_ns)
     uri = Path(path).resolve().as_uri()
     info = discoverer.discover_uri(uri)
-    result: dict[str, Any] = {"duration_ms": info.get_duration() // Gst.MSECOND}
+    duration_ns = info.get_duration()
+    result: dict[str, Any] = {}
+    if duration_ns != Gst.CLOCK_TIME_NONE:
+        result["duration_ms"] = duration_ns // Gst.MSECOND
 
     for stream in info.get_stream_list():
         if isinstance(stream, GstPbutils.DiscovererVideoInfo):

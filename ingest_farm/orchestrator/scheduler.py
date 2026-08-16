@@ -16,7 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 class Scheduler:
-    """Assigns channel connect/record jobs to the farm via Redis."""
+    """Assigns channel connect/record jobs via Redis.
+
+    Single-worker mode is the supported deployment: all jobs are broadcast on
+    shared queues. ``worker_hint`` is not used for routing (farm scheduling is
+    a future pass).
+    """
 
     def connect_channel(self, db: Session, channel_id: str) -> None:
         channel = db.get(Channel, channel_id)
@@ -29,6 +34,7 @@ class Scheduler:
         if worker is None:
             logger.warning("No workers registered yet; queueing connect for %s anyway", channel_id)
 
+        # worker_hint is informational only (single-worker deployments).
         publish_event(
             CHANNEL_CONNECT_QUEUE,
             {"channel_id": channel_id, "worker_hint": worker.hostname if worker else None},

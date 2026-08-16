@@ -52,6 +52,9 @@ services:
       context: .
       dockerfile: Dockerfile.gst
     command: ["python", "scripts/run_api.py"]
+    env_file:
+      - path: .env
+        required: false
     environment: &app-env
       DATABASE_URL: postgresql+psycopg://ingest:ingest@postgres:5432/ingest_farm
       REDIS_URL: redis://redis:6379/0
@@ -64,6 +67,8 @@ services:
       - ./data:/data
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
       - ./web/dist:/app/web/dist:ro
     depends_on:
       postgres:
@@ -91,6 +96,9 @@ services:
       dockerfile: Dockerfile.gst
     command: ["python", "scripts/run_worker.py"]
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
     environment:
       <<: *app-env
       WORKER_ID: worker-1
@@ -102,6 +110,8 @@ services:
       - ./data:/data
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,12 +125,17 @@ services:
       context: .
       dockerfile: Dockerfile.gst
     command: ["python", "scripts/run_postprocess.py"]
+    env_file:
+      - path: .env
+        required: false
     environment:
       <<: *app-env
     volumes:
       - ./data:/data
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,12 +150,17 @@ services:
       dockerfile: Dockerfile.gst
     profiles:
       - gst
+    env_file:
+      - path: .env
+        required: false
     environment:
       <<: *app-env
     volumes:
       - ./data:/data
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
     working_dir: /app
 
 volumes:

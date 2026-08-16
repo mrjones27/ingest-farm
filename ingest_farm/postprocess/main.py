@@ -8,10 +8,60 @@ from ingest_farm.common.gst_utils import discover_file, init_gstreamer
 from ingest_farm.common.storage import LocalStorage
 from ingest_farm.db import get_session_factory, init_db
 from ingest_farm.models import Asset, Channel, Recording
-from ingest_farm.postprocess.proxy import generate_hls_proxy
+from ingest_farm.postprocess.proxy import generate_hls_proxy, playlist_duration_ms
 from ingest_farm.postprocess.thumbnail import generate_thumbnail
 
 logger = logging.getLogger(__name__)
+
+BACKFILL_BATCH = 5
+# Discoverer on live MPEG-TS can return CLOCK_TIME_NONE or PCR-wrap junk.
+_MAX_SANE_DURATION_MS = 12 * 3600 * 1000
+
+
+def sane_media_ms(value: object) -> int | None:
+    try:
+        ms = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0 or ms > _MAX_SANE_DURATION_MS:
+        return None
+    return ms
+
+
+def resolve_asset_duration_ms(
+    *,
+    playlist_ms: int | None,
+    discover_ms: int | None,
+    wall_ms: int | None,
+) -> tuple[int | None, str]:
+    """Prefer actual media time (HLS, then probe). Wall clock is the record window only."""
+    if playlist_ms is not None and playlist_ms > 0:
+        return playlist_ms, "hls_playlist"
+    if discover_ms is not None and discover_ms > 0:
+        if wall_ms is not None and discover_ms > wall_ms * 2:
+            return wall_ms, "wall_clock"
+        return discover_ms, "discoverer"
+    if wall_ms is not None and wall_ms > 0:
+        return wall_ms, "wall_clock"
+    return None, "unknown"
+
+
+def concat_mpegts_segments(segments: list[Path], master_path: Path) -> Path:
+    """Concatenate MPEG-TS segments in order into a single master file."""
+    if not segments:
+        raise ValueError("No segments to concatenate")
+    if len(segments) == 1:
+        return segments[0]
+    master_path.parent.mkdir(parents=True, exist_ok=True)
+    with master_path.open("wb") as out:
+        for seg in segments:
+            with seg.open("rb") as fh:
+                while True:
+                    chunk = fh.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+    return master_path
 
 
 class PostProcessWorker:
@@ -28,12 +78,18 @@ class PostProcessWorker:
         except Exception:
             logger.warning("GStreamer init failed — proxy/thumbnail may be unavailable")
         logger.info("Post-process worker started")
-        self._backfill_missing_media()
+        self._backfill_missing_media(limit=BACKFILL_BATCH)
 
         while self._running:
             job = blocking_pop(POSTPROCESS_QUEUE, timeout=5)
             if job:
-                self._process(job)
+                try:
+                    self._process(job)
+                except Exception:
+                    logger.exception(
+                        "Post-process job failed (recording_id=%s)",
+                        job.get("recording_id"),
+                    )
 
     def _derive_media(self, master_path: Path, derived_dir: Path) -> tuple[str | None, str | None, dict]:
         """Generate HLS proxy + thumbnail from a master media file."""
@@ -65,15 +121,21 @@ class PostProcessWorker:
 
         return proxy_path, thumbnail_path, metadata
 
-    def _backfill_missing_media(self) -> None:
-        """Fill proxy/thumbnail for cataloged assets that still have a master file."""
+    def _backfill_missing_media(self, *, limit: int = BACKFILL_BATCH) -> None:
+        """Fill proxy/thumbnail for a bounded batch of cataloged assets."""
         with get_session_factory()() as db:
             assets = (
                 db.query(Asset)
                 .filter((Asset.proxy_path.is_(None)) | (Asset.thumbnail_path.is_(None)))
+                .order_by(Asset.created_at.desc())
+                .limit(limit)
                 .all()
             )
-            logger.info("Backfill: %s asset(s) missing proxy and/or thumbnail", len(assets))
+            logger.info(
+                "Backfill: processing up to %s asset(s) missing proxy and/or thumbnail (found %s)",
+                limit,
+                len(assets),
+            )
             for asset in assets:
                 master = Path(asset.master_path)
                 if not master.is_file():
@@ -142,51 +204,42 @@ class PostProcessWorker:
                 db.commit()
                 return
 
-            master_path = segments[0]
+            if len(segments) == 1:
+                master_path = segments[0]
+            else:
+                master_path = concat_mpegts_segments(segments, master_dir / "master.ts")
+                metadata["concatenated_segments"] = len(segments)
             master_path_str = str(master_path)
             wall_ms = None
             if recording.started_at and recording.ended_at:
                 wall_ms = int(
                     (recording.ended_at - recording.started_at).total_seconds() * 1000
                 )
+            discover_ms = None
             try:
-                metadata.update(discover_file(master_path_str))
+                discovered = discover_file(master_path_str)
+                discover_ms = sane_media_ms(discovered.pop("duration_ms", None))
+                metadata.update(discovered)
             except Exception:
                 logger.warning("Could not discover metadata for %s", master_path_str)
-
-            discover_ms = metadata.get("duration_ms")
-            # Live MPEG-TS probe duration is unreliable; prefer recording wall clock.
-            if wall_ms is not None and wall_ms > 0:
-                metadata["discover_duration_ms"] = discover_ms
-                metadata["duration_ms"] = wall_ms
-                metadata["duration_source"] = "wall_clock"
-            elif discover_ms is not None:
-                metadata["duration_source"] = "discoverer"
-
-            # #region agent log
-            from ingest_farm.common.agent_debug import agent_log
-
-            agent_log(
-                "B",
-                "postprocess/main.py:_process",
-                "duration compare",
-                {
-                    "recording_id": recording_id,
-                    "wall_ms": wall_ms,
-                    "discover_ms": discover_ms,
-                    "chosen_ms": metadata.get("duration_ms"),
-                    "duration_source": metadata.get("duration_source"),
-                    "segment_count": len(segments),
-                    "segment_bytes": [p.stat().st_size for p in segments],
-                    "master": master_path_str,
-                },
-                run_id="post-fix",
-            )
-            # #endregion
 
             derived_dir = master_dir / "derived"
             proxy_path, thumbnail_path, media_meta = self._derive_media(master_path, derived_dir)
             metadata.update(media_meta)
+
+            playlist_ms = None
+            if proxy_path:
+                playlist_ms = playlist_duration_ms(Path(proxy_path))
+            duration_ms, duration_source = resolve_asset_duration_ms(
+                playlist_ms=playlist_ms,
+                discover_ms=discover_ms,
+                wall_ms=wall_ms,
+            )
+            metadata["record_window_ms"] = wall_ms
+            metadata["discover_duration_ms"] = discover_ms
+            metadata["proxy_duration_ms"] = playlist_ms
+            metadata["duration_ms"] = duration_ms
+            metadata["duration_source"] = duration_source
 
             asset = Asset(
                 recording_id=recording_id,
@@ -194,7 +247,7 @@ class PostProcessWorker:
                     f"{channel.name if channel else recording.channel_id} — "
                     f"{recording.started_at.isoformat()}"
                 ),
-                duration_ms=metadata.get("duration_ms"),
+                duration_ms=duration_ms,
                 width=metadata.get("width"),
                 height=metadata.get("height"),
                 video_codec=metadata.get("video_codec"),

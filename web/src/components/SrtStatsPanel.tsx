@@ -1,4 +1,4 @@
-/** Compact live SRT metrics from worker-published Gst stats. */
+/** Compact live SRT metrics from worker-published Gst / probe stats. */
 
 function fmtRate(v: unknown): string {
   const n = typeof v === "number" ? v : Number(v);
@@ -48,7 +48,7 @@ export function SrtStatsPanel({
   stats: Record<string, unknown> | null | undefined;
   compact?: boolean;
 }) {
-  if (!stats || !stats.available) {
+  if (!stats || stats.available !== true) {
     if (compact) return <span className="text-xs text-slate-600">—</span>;
     return (
       <p className="text-sm text-slate-500">
@@ -57,39 +57,33 @@ export function SrtStatsPanel({
     );
   }
 
-  const rate =
-    stats["receive-rate-mbps"] ?? stats["send-rate-mbps"];
-  const lost =
-    stats["packets-received-lost"] ?? stats["packets-sent-lost"];
+  const rate = stats["receive-rate-mbps"] ?? stats["send-rate-mbps"];
+  const lost = stats["packets-received-lost"] ?? stats["packets-sent-lost"];
+  const hasRtt = stats["rtt-ms"] != null;
+  const state = stats.receiving ? "receiving" : "listening";
 
   if (compact) {
-    return (
-      <span className="font-mono text-xs text-slate-300">
-        {fmtMs(stats["rtt-ms"])} ms · {fmtRate(rate)} Mb/s
-        {lost != null && Number(lost) > 0 ? ` · lost ${fmtInt(lost)}` : ""}
-      </span>
-    );
+    const parts = [state];
+    if (rate != null && Number.isFinite(Number(rate))) {
+      parts.push(`${fmtRate(rate)} Mb/s`);
+    }
+    if (hasRtt) {
+      parts.push(`${fmtMs(stats["rtt-ms"])} ms`);
+    }
+    if (lost != null && Number(lost) > 0) {
+      parts.push(`lost ${fmtInt(lost)}`);
+    }
+    return <span className="font-mono text-xs text-slate-300">{parts.join(" · ")}</span>;
   }
 
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+      <Stat label="State" value={state} />
+      <Stat label="Recv rate" value={fmtRate(rate)} unit="Mb/s" />
       <Stat label="RTT" value={fmtMs(stats["rtt-ms"])} unit="ms" />
       <Stat label="Est. path" value={fmtRate(stats["bandwidth-mbps"])} unit="Mb/s" />
-      <Stat
-        label="Recv rate"
-        value={fmtRate(stats["receive-rate-mbps"] ?? stats["send-rate-mbps"])}
-        unit="Mb/s"
-      />
-      <Stat
-        label="Latency"
-        value={fmtInt(stats["negotiated-latency-ms"])}
-        unit="ms"
-      />
+      <Stat label="Latency" value={fmtInt(stats["negotiated-latency-ms"])} unit="ms" />
       <Stat label="Lost (total)" value={fmtInt(lost)} />
-      <Stat
-        label="NACKs sent"
-        value={fmtInt(stats["packet-nack-sent"] ?? stats["packets-retransmitted"] ?? stats["packet-nack-received"])}
-      />
     </div>
   );
 }

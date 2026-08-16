@@ -49,6 +49,8 @@ class ChannelSession:
         self._srt_has_data = False
         self._srt_proc: subprocess.Popen[str] | None = None
         self._srt_state_dir: Path | None = None
+        self._preview_mode: str = "fakesink"
+        self._segment_duration_sec: int = 3600
 
     @property
     def session_id(self) -> str:
@@ -85,15 +87,34 @@ class ChannelSession:
             status_path = self._srt_state_dir / "status.json"
             try:
                 data = json.loads(status_path.read_text(encoding="utf-8"))
-                receiving = bool(data.get("receiving"))
                 with self._stats_lock:
                     self._stats = {
+                        **data,
+                        "available": True,
                         "protocol": "srt",
-                        "receiving": receiving,
+                        "receiving": bool(data.get("receiving")),
+                        "preview": data.get("preview", "fakesink"),
                         "note": "srt child process",
                     }
             except (OSError, json.JSONDecodeError):
                 pass
+        elif self._pipeline is not None and self._srt_proc is None:
+            # Promote thumb for in-process live tee.
+            if self._thumb_path is not None and self._preview_dir is not None:
+                try:
+                    if self._thumb_path.is_file() and self._thumb_path.stat().st_size >= 100:
+                        stable = self._preview_dir / "thumb.ok.jpg"
+                        stable.write_bytes(self._thumb_path.read_bytes())
+                except OSError:
+                    pass
+            with self._stats_lock:
+                if not self._stats:
+                    self._stats = {
+                        "available": True,
+                        "protocol": str(self._source_kind or "unknown"),
+                        "receiving": True,
+                        "preview": "jpeg",
+                    }
         with self._stats_lock:
             return dict(self._stats)
 
@@ -109,6 +130,7 @@ class ChannelSession:
             self._stats = {}
         self._srt_has_data = False
         self._source_kind = config.source.protocol
+        self._segment_duration_sec = config.pipeline.segment_duration_sec
 
         if config.source.protocol == "srt":
             self._connect_srt_child(config, preview_dir)
@@ -126,7 +148,8 @@ class ChannelSession:
         self._record_idle_sink = ctx.get("record_idle_sink")
         self._thumb_path = ctx.get("thumb_path")
         self._source = ctx.get("source_element")
-        self._source_kind = ctx.get("source_kind")
+        self._source_kind = ctx.get("source_kind") or config.source.protocol
+        self._preview_mode = ctx.get("preview_mode", "jpeg")
         ret = self._pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
             self._pipeline = None
@@ -134,13 +157,21 @@ class ChannelSession:
         self._loop = None
         self._thread = None
         self._stats_timeout_id = None
+        with self._stats_lock:
+            self._stats = {
+                "available": True,
+                "protocol": str(self._source_kind),
+                "receiving": True,
+                "preview": self._preview_mode,
+            }
         logger.info("Channel %s connected → preview %s", config.name, preview_dir)
 
     def _connect_srt_child(self, config: ChannelConfig, preview_dir: Path) -> None:
         state_dir = preview_dir / "_srt_session"
         if state_dir.exists():
             for p in state_dir.iterdir():
-                p.unlink(missing_ok=True)
+                if p.is_file():
+                    p.unlink(missing_ok=True)
         else:
             state_dir.mkdir(parents=True, exist_ok=True)
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -157,6 +188,7 @@ class ChannelSession:
                 config.source.uri,
                 str(preview_dir),
                 str(state_dir),
+                str(config.pipeline.segment_duration_sec),
             ],
             stdout=log_f,
             stderr=subprocess.STDOUT,
@@ -181,20 +213,52 @@ class ChannelSession:
             raise RuntimeError("SRT session process failed to become ready")
 
         self._srt_proc = proc
-        # Sentinel so legacy checks that look at _pipeline still see "connected".
         self._pipeline = object()
+        self._preview_mode = "jpeg"
+        try:
+            data = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
+            self._preview_mode = str(data.get("preview") or "jpeg")
+        except (OSError, json.JSONDecodeError):
+            pass
+        with self._stats_lock:
+            self._stats = {
+                "available": True,
+                "protocol": "srt",
+                "receiving": False,
+                "preview": self._preview_mode,
+                "note": "srt child process",
+            }
         logger.info(
-            "Channel %s SRT listener in child pid=%s → %s",
+            "Channel %s SRT listener in child pid=%s → %s (preview=%s)",
             config.name,
             proc.pid,
             preview_dir,
+            self._preview_mode,
         )
 
     def _srt_send_cmd(self, cmd: str) -> None:
         if self._srt_state_dir is None:
             raise RuntimeError("Not connected")
-        path = self._srt_state_dir / "cmd"
-        path.write_text(cmd, encoding="utf-8")
+        path = self._srt_state_dir / "cmds"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(cmd.rstrip() + "\n")
+
+    def _wait_srt_recording(self, want: bool, timeout_sec: float = 5.0) -> bool:
+        if self._srt_state_dir is None:
+            return False
+        status_path = self._srt_state_dir / "status.json"
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                data = json.loads(status_path.read_text(encoding="utf-8"))
+                if bool(data.get("recording")) is want:
+                    return True
+            except (OSError, json.JSONDecodeError):
+                pass
+            if self._srt_proc is not None and self._srt_proc.poll() is not None:
+                return False
+            time.sleep(0.05)
+        return False
 
     def start_recording(self, output_dir: Path) -> None:
         if not self.is_connected:
@@ -208,6 +272,8 @@ class ChannelSession:
 
         if self._srt_proc is not None:
             self._srt_send_cmd(f"record {output_dir}")
+            if not self._wait_srt_recording(True):
+                raise RuntimeError("SRT child did not acknowledge recording start")
             self._recording = True
             self._record_started_at = time.time()
             logger.info("Channel %s recording (child) → %s", self._channel_name, output_dir)
@@ -215,19 +281,15 @@ class ChannelSession:
 
         from gi.repository import Gst
 
+        from ingest_farm.pipeline.stages.output.preview import relink_valve
+
         if self._valve is None or self._record_sink is None:
             raise RuntimeError("Not connected")
 
         location = str(output_dir / "segment_%05d.ts")
         self._record_sink.set_property("location", location)
-        idle = self._record_idle_sink
-        if idle is not None:
-            self._valve.unlink(idle)
-        if self._record_sink.get_parent() is None:
-            self._pipeline.add(self._record_sink)
-        if not self._valve.link(self._record_sink):
+        if not relink_valve(self._valve, self._record_sink, self._pipeline, Gst):
             raise RuntimeError("Failed to link valve → multifilesink")
-        self._record_sink.sync_state_with_parent()
         self._valve.set_property("drop", False)
         self._recording = True
         self._record_started_at = time.time()
@@ -240,22 +302,17 @@ class ChannelSession:
         if self._srt_proc is not None:
             try:
                 self._srt_send_cmd("stop")
+                self._wait_srt_recording(False, timeout_sec=3.0)
             except Exception:
                 logger.exception("Failed to send stop to SRT child")
         elif self._valve is not None:
             from gi.repository import Gst
 
+            from ingest_farm.pipeline.stages.output.preview import relink_valve
+
             self._valve.set_property("drop", True)
-            if self._record_sink is not None and self._record_idle_sink is not None:
-                try:
-                    self._valve.unlink(self._record_sink)
-                except Exception:
-                    pass
-                self._record_sink.set_state(Gst.State.NULL)
-                srcpad = self._valve.get_static_pad("src")
-                if srcpad is not None and not srcpad.is_linked():
-                    self._valve.link(self._record_idle_sink)
-                    self._record_idle_sink.sync_state_with_parent()
+            if self._record_idle_sink is not None:
+                relink_valve(self._valve, self._record_idle_sink, self._pipeline, Gst)
 
         self._recording = False
         wall_sec = None
@@ -264,7 +321,7 @@ class ChannelSession:
         self._record_started_at = None
         sizes: list[int] = []
         if self._output_dir is not None:
-            segs = list(self._output_dir.glob("*.ts"))
+            segs = list(self._output_dir.glob("segment_*.ts"))
             self._segment_count = len(segs)
             sizes = [p.stat().st_size for p in segs]
         logger.info(
@@ -415,7 +472,7 @@ class PipelineRecorder:
         if thread is not None and not same_thread:
             thread.join(timeout=10)
         if self._output_dir is not None:
-            self._segment_count = len(list(self._output_dir.glob("*.ts")))
+            self._segment_count = len(list(self._output_dir.glob("segment_*.ts")))
         logger.info("Pipeline stopped")
 
     def _on_bus_message(self, bus: Any, message: Any) -> None:

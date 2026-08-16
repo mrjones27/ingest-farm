@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from ingest_farm.schemas import new_id
@@ -40,7 +40,7 @@ class Recording(Base):
     status: Mapped[str] = mapped_column(String(32), default="recording")
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     segment_count: Mapped[int] = mapped_column(Integer, default=0)
-    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    byte_size: Mapped[int] = mapped_column(BigInteger, default=0)
 
     channel: Mapped[Channel] = relationship(back_populates="recordings")
     asset: Mapped[Asset | None] = relationship(back_populates="recording", uselist=False)

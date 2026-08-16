@@ -16,7 +16,7 @@ class LocalStorage:
         return path
 
     def list_segments(self, path: Path) -> list[Path]:
-        return sorted(path.glob("*.ts"))
+        return sorted(p for p in path.glob("segment_*.ts") if p.is_file())
 
     def total_size(self, path: Path) -> int:
         return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())

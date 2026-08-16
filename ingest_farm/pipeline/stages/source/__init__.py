@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ingest_farm.config import get_settings
 from ingest_farm.pipeline.stages.base import SourceStage
 from ingest_farm.schemas import ChannelConfig
 
@@ -64,72 +65,34 @@ class SrtSourceStage(SourceStage):
         from gi.repository import Gst
         from urllib.parse import parse_qs, urlparse
 
-        # parse_launch sets uri + keep-listening + authentication together.
-        # make() then set_property("uri") alone left keep-listening=false and
-        # authentication=true; extra set_property after uri SIGSEGV'd on accept.
-        # A one-shot parse_launch listener survived hundreds of caller buffers.
+        # Prefer ElementFactory + set_property (no parse_launch URI interpolation).
+        settings = get_settings()
         uri = config.source.uri
         if not uri.startswith("srt://"):
             uri = f"srt://{uri}"
+        if '"' in uri or "!" in uri:
+            raise ValueError("Invalid SRT URI")
         parsed = urlparse(uri)
         query = parse_qs(parsed.query)
         has_latency = "latency" in query or "latency" in config.source.config
-        applied_latency = None
         if not has_latency:
-            uri = f"{uri}{'&' if parsed.query else '?'}latency=500"
-            applied_latency = 500
-        elif "latency" in query:
-            applied_latency = int(query["latency"][0])
+            uri = settings.ensure_srt_latency(uri)
+        elif "latency" not in query and "latency" in config.source.config:
+            uri = f"{uri}{'&' if parsed.query else '?'}latency={config.source.config['latency']}"
 
-        auth = config.source.config.get("authentication")
-        auth_flag = "true" if auth in (True, "true", "1", 1) else "false"
-        desc = (
-            f'srtsrc name=source uri="{uri}" wait-for-connection=true '
-            f"keep-listening=true authentication={auth_flag}"
-        )
-        src = Gst.parse_launch(desc)
+        src = Gst.ElementFactory.make("srtsrc", "source")
         if src is None:
             raise RuntimeError("GStreamer element 'srtsrc' not available — install gst-plugins-bad")
+        src.set_property("uri", uri)
+        wait = config.source.config.get("wait_for_connection", settings.gst_srt_wait_for_connection)
+        src.set_property("wait-for-connection", bool(wait))
+        if src.find_property("keep-listening"):
+            keep = config.source.config.get("keep_listening", settings.gst_srt_keep_listening)
+            src.set_property("keep-listening", bool(keep))
+        auth = config.source.config.get("authentication", settings.gst_srt_authentication)
+        if src.find_property("authentication"):
+            src.set_property("authentication", auth in (True, "true", "1", 1))
         ctx["pipeline"].add(src)
-
-        # #region agent log
-        from ingest_farm.common.agent_debug import agent_log
-
-        parsed = urlparse(uri)
-        props = {}
-        for name in (
-            "uri",
-            "latency",
-            "wait-for-connection",
-            "keep-listening",
-            "authentication",
-            "auto-reconnect",
-            "localaddress",
-            "localport",
-            "mode",
-        ):
-            if src.find_property(name):
-                try:
-                    props[name] = src.get_property(name)
-                except Exception as exc:
-                    props[name] = f"err:{exc}"
-        agent_log(
-            "A",
-            "source/__init__.py:SrtSourceStage.link",
-            "srtsrc bind config",
-            {
-                "uri": uri,
-                "host": parsed.hostname,
-                "port": parsed.port,
-                "query": parsed.query,
-                "applied_latency": applied_latency,
-                "from_default": not has_latency,
-                "desc": desc,
-                "props": props,
-            },
-            run_id="obs-caller",
-        )
-        # #endregion
 
         ctx["source_element"] = src
         ctx["source_kind"] = "srt"
@@ -156,6 +119,10 @@ class UdpSourceStage(SourceStage):
         else:
             src.set_property("port", int(uri))
 
+        settings = get_settings()
+        if settings.gst_udp_buffer_size > 0 and src.find_property("buffer-size"):
+            src.set_property("buffer-size", int(settings.gst_udp_buffer_size))
+
         transport = (config.source.config.get("transport") or "mpegts").lower()
         pipeline.add(src)
 
@@ -169,6 +136,8 @@ class UdpSourceStage(SourceStage):
         if jitter is None:
             raise RuntimeError("rtpjitterbuffer not available")
         pipeline.add(jitter)
+        if jitter.find_property("latency"):
+            jitter.set_property("latency", int(settings.gst_rtp_jitterbuffer_ms))
         src.link(jitter)
 
         if transport in {"rtp-mp2t", "rtp-mpegts"}:
@@ -218,6 +187,7 @@ class FileSourceStage(SourceStage):
             raise RuntimeError("filesrc/tsparse GStreamer elements not available")
 
         src.set_property("location", config.source.uri)
+        get_settings().configure_tsparse(tsparse)
         ctx["pipeline"].add(src)
         ctx["pipeline"].add(tsparse)
         if not src.link(tsparse):

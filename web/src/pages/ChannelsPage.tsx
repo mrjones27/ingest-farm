@@ -17,7 +17,7 @@ import { usePoll } from "../hooks/usePoll";
 import { formatWhen } from "../lib/format";
 
 const PROTOCOLS: SourceProtocol[] = ["srt", "udp", "rtmp", "hls", "file"];
-const PROFILES: PipelineProfile[] = ["ts_passthrough", "transcode_remux"];
+const PROFILES: PipelineProfile[] = ["ts_passthrough"];
 
 const URI_HINT: Record<SourceProtocol, string> = {
   srt: "srt://0.0.0.0:9000?mode=listener",

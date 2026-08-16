@@ -104,6 +104,8 @@ def test_asset_media_serving(client_and_db, tmp_path: Path) -> None:
     playlist_resp = client.get(f"/api/assets/{asset_id}/proxy/playlist.m3u8")
     assert playlist_resp.status_code == 200
     assert f"/api/assets/{asset_id}/proxy/segment_00000.ts" in playlist_resp.text
+    assert "#EXT-X-ENDLIST" in playlist_resp.text
+    assert "#EXT-X-PLAYLIST-TYPE:VOD" in playlist_resp.text
 
     segment_resp = client.get(f"/api/assets/{asset_id}/proxy/segment_00000.ts")
     assert segment_resp.status_code == 200
