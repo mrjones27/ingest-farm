@@ -19,6 +19,8 @@ class PassthroughStage(ProcessingStage):
         queue.set_property("max-size-time", 2 * Gst.SECOND)
         queue.set_property("max-size-buffers", 0)
         queue.set_property("max-size-bytes", 0)
+        # Never block the SRT listener if the tee/preview stalls.
+        queue.set_property("leaky", 2)  # downstream
 
         ctx["pipeline"].add(queue)
         if not upstream.link(queue):

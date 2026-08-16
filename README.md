@@ -124,6 +124,33 @@ curl http://localhost:8080/health
 
 Supported ingest protocols: `srt`, `udp` (mpegts / `rtp-h264` / `rtp-mp2t`), `rtmp`, `hls`, `file`.
 
+## Live connect / record (SRT)
+
+Connect starts the listener without writing segments; Record opens the gated capture branch.
+
+```bash
+curl -X POST http://localhost:8080/api/channels/{id}/connect
+curl -X POST http://localhost:8080/api/channels/{id}/record/start
+curl -X POST http://localhost:8080/api/channels/{id}/record/stop
+curl -X POST http://localhost:8080/api/channels/{id}/disconnect
+```
+
+### SRT listener (farm listens, OBS/ffmpeg calls in)
+
+Publish the listen port on the worker (see `docker-compose.yml`, e.g. `5001:5001/udp`). Channel URI example:
+
+`srt://0.0.0.0:5001?mode=listener`
+
+Caller (OBS / ffmpeg / gst): `srt://127.0.0.1:5001` (or `srt://worker:5001` from another compose service).
+
+**Implementation note (gst 1.24 / libsrt):** an in-process `compose_live` SRT listener aborts the worker when a caller connects. SRT sessions therefore run in a **child process** (`ingest_farm.worker.srt_session_proc`) with a parse_launch graph:
+
+`srtsrc` (`keep-listening=true`, `authentication=false`) → leaky queue → tee → preview fakesink + valve-gated record branch.
+
+Do not call `srtsrc.get_property("stats")` or `bus.add_signal_watch()` on the live SRT path — both have aborted libsrt on this stack. Receiving state is inferred from buffer probes in the child.
+
+SRT **caller** mode (farm dials out to an OBS/ffmpeg listener) still uses the in-process live session and remains the simpler fallback if needed.
+
 ## Project layout
 
 ```
@@ -133,10 +160,11 @@ ingest_farm/
     stages/
       source/               # SRT, UDP/RTP, RTMP, HLS, file
       processing/           # Passthrough (Phase 1)
-      output/               # TS capture
+      output/               # TS capture + live tee
     encoders/
       registry.py           # Swappable encoder plugins
-  worker/                   # GStreamer recorder
+  worker/                   # GStreamer recorder (+ SRT child session)
+    srt_session_proc.py     # Isolated SRT listener process
   orchestrator/             # Redis job scheduler
   postprocess/              # HLS proxy + thumbnail + catalog
   api/                      # FastAPI control plane + media serving + SPA
@@ -151,5 +179,5 @@ scripts/
 - [ ] `transcode_remux` profile — demux, encoder registry, remux (MKV/MXF)
 - [ ] External SDK adapters — MainConcept, Insync
 - [ ] Audio track in HLS proxy
-- [ ] SRT control-plane E2E
+- [ ] Live JPEG preview restored for SRT listener path
 - [ ] Archive tiers / approval workflow

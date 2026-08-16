@@ -61,6 +61,8 @@ class IngestWorker:
         from gi.repository import GLib
 
         init_db()
+        # Default main context must be iterated — libsrt/srtsrc aborts in this
+        # process when a session MainLoop runs alone without a process loop.
         init_gstreamer()
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)

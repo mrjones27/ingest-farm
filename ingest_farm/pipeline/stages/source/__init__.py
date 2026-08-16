@@ -64,14 +64,10 @@ class SrtSourceStage(SourceStage):
         from gi.repository import Gst
         from urllib.parse import parse_qs, urlparse
 
-        src = Gst.ElementFactory.make("srtsrc", "source")
-        if src is None:
-            raise RuntimeError("GStreamer element 'srtsrc' not available — install gst-plugins-bad")
-
-        # Parent, then set uri once. Extra set_property after uri makes the
-        # next caller SIGSEGV/SIGABRT. make-add-uri survived 372 buffers.
-        ctx["pipeline"].add(src)
-
+        # parse_launch sets uri + keep-listening + authentication together.
+        # make() then set_property("uri") alone left keep-listening=false and
+        # authentication=true; extra set_property after uri SIGSEGV'd on accept.
+        # A one-shot parse_launch listener survived hundreds of caller buffers.
         uri = config.source.uri
         if not uri.startswith("srt://"):
             uri = f"srt://{uri}"
@@ -84,7 +80,17 @@ class SrtSourceStage(SourceStage):
             applied_latency = 500
         elif "latency" in query:
             applied_latency = int(query["latency"][0])
-        src.set_property("uri", uri)
+
+        auth = config.source.config.get("authentication")
+        auth_flag = "true" if auth in (True, "true", "1", 1) else "false"
+        desc = (
+            f'srtsrc name=source uri="{uri}" wait-for-connection=true '
+            f"keep-listening=true authentication={auth_flag}"
+        )
+        src = Gst.parse_launch(desc)
+        if src is None:
+            raise RuntimeError("GStreamer element 'srtsrc' not available — install gst-plugins-bad")
+        ctx["pipeline"].add(src)
 
         # #region agent log
         from ingest_farm.common.agent_debug import agent_log
@@ -118,6 +124,7 @@ class SrtSourceStage(SourceStage):
                 "query": parsed.query,
                 "applied_latency": applied_latency,
                 "from_default": not has_latency,
+                "desc": desc,
                 "props": props,
             },
             run_id="obs-caller",
