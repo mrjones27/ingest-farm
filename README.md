@@ -18,7 +18,7 @@ Channel config selects a **pipeline profile**:
 
 `transcode_remux` is not supported yet and is rejected by the API.
 
-Encoders register via `EncoderRegistry` (`gstreamer:x264enc`, `mainconcept:h264`, `insync`, etc.).
+Encoders register via `EncoderRegistry`.
 
 **Deployment note:** the control plane is validated for a **single ingest worker**. Multi-worker farm routing is future work.
 
@@ -182,7 +182,7 @@ scripts/
 ## Roadmap
 
 - [ ] `transcode_remux` profile — demux, encoder registry, remux (MKV/MXF)
-- [ ] External SDK adapters — MainConcept, Insync
+- [ ] External SDK adapters
 - [ ] Audio track in HLS proxy
 - [ ] Multi-worker farm job routing
 - [ ] Full libsrt stats on the SRT child path
