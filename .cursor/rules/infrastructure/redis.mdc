@@ -1,0 +1,121 @@
+---
+description: Redis job queue and runtime stats contract between control plane and workers
+globs:
+  - "ingest_farm/**/*.py"
+  - "tests/**/*.py"
+  - "scripts/**/*.py"
+alwaysApply: false
+---
+
+# Redis
+
+Redis is the transport between the control plane and the ingest workers, and the
+carrier for ephemeral runtime state.
+
+All access goes through `ingest_farm/common/events.py`. Treat that module as the
+source of truth for queue names, key formats and client construction. Do not
+open Redis connections elsewhere and do not hardcode key strings.
+
+## What Redis Is For
+
+Redis carries transient data only:
+
+- pending jobs: channel connect, disconnect, record start, record stop,
+  postprocess
+- completion events for recordings
+- ephemeral per-channel runtime stats, under a key with a short TTL
+
+PostgreSQL holds all durable state.
+
+Never store durable state only in Redis. If a value must survive a Redis restart
+or eviction, it belongs in the database.
+
+## Queues
+
+Job queues are Redis lists.
+
+The control plane pushes with `publish_event` (LPUSH). Workers consume with
+`blocking_pop` (BRPOP) or `try_pop` (RPOP).
+
+Use the queue constants exported from `ingest_farm/common/events.py`. Do not
+introduce a new queue without a concrete requirement, and if one is genuinely
+needed, define its name alongside the existing constants.
+
+Payloads are JSON objects. Keep them small and keep them to identifiers, for
+example `{"channel_id": ...}`. Look the entity up in the database on the
+consuming side rather than sending full state through the queue.
+
+## Delivery Semantics
+
+A popped job is gone. There is no acknowledgement, no retry and no redelivery.
+
+Consequences that must be respected:
+
+- A worker that crashes mid-job loses that job.
+- Recovery is by reconciling database state on worker startup, not by replaying
+  Redis. See `_reconcile_orphaned_channels` in `ingest_farm/worker/main.py`.
+- Do not assume a queued job will be executed.
+- Do not rely on ordering guarantees beyond a single list.
+- Do not build a retry, dead-letter or acknowledgement scheme on top of these
+  lists without an explicit architectural decision. Reconciliation is the
+  existing recovery model.
+
+Because jobs can be lost, database status must never be left in a transitional
+state that nothing can recover from.
+
+## Runtime Stats
+
+The worker heartbeat writes per-channel stats with a short TTL. The API reads
+them when building a channel response.
+
+The TTL is the liveness signal. An absent stats key means "no fresh runtime
+state", not "the channel stopped".
+
+Do not infer channel lifecycle state from the absence of a stats key. Channel
+state lives in the database; stats describe how a running pipeline is behaving.
+
+Clear stats explicitly when a session ends, rather than waiting for expiry, so
+that stale values are not served during teardown.
+
+## Failure Handling
+
+Redis being unavailable must degrade runtime visibility, not break the control
+plane.
+
+Reading stats is best-effort. A failed stats read should yield no stats rather
+than failing a request that would otherwise succeed. An endpoint whose entire
+purpose is runtime stats may fail, but a general channel listing must not.
+
+Publishing a job is not best-effort. If a job cannot be published, the requested
+state change has not been accepted and the caller must be told.
+
+## Clients
+
+Use `get_redis` rather than constructing clients directly. It caches clients per
+URL and socket timeout.
+
+The socket timeout matters: blocking pops need `socket_timeout=None`, or a value
+greater than the BRPOP timeout, or the socket will time out mid-wait. Health
+checks and short reads should pass a small timeout so they cannot hang.
+
+## Status Ownership
+
+The control plane writes transitional intent, for example `connecting`,
+`disconnecting`, `starting`, `stopping`.
+
+The worker writes achieved state, for example `connected`, `recording`, `idle`,
+`error`.
+
+Preserve this split. The API must not write achieved state, and the worker must
+not invent intent.
+
+## Deployment Scope
+
+Single-worker deployment is the supported mode.
+
+Jobs are broadcast on shared queues, and `worker_hint` is informational only.
+Per-worker routing is not implemented.
+
+Do not write code, comments or documentation that describes multi-worker
+scheduling as though it already exists. If farm-wide scheduling is required, it
+is a deliberate design change.

@@ -3,8 +3,8 @@ description: Docker and containerisation rules for the ingest farm
 globs:
   - "**/Dockerfile"
   - "**/Dockerfile.*"
-  - "**/compose*.yml"
-  - "**/compose*.yaml"
+  - "**/*compose*.yml"
+  - "**/*compose*.yaml"
 alwaysApply: false
 ---
 

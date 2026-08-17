@@ -1,7 +1,7 @@
 ---
 description: Broadcast network troubleshooting and networking rules
 globs:
-  - "backend/**/*.py"
+  - "ingest_farm/**/*.py"
   - "tests/**/*.py"
   - "**/*.sh"
   - "**/*.md"

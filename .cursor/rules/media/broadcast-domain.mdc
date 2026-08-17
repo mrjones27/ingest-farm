@@ -1,10 +1,11 @@
 ---
 description: Broadcast media domain knowledge for RTP, MPEG-TS, SRT and multicast
 globs:
-  - "backend/**/*.py"
-  - "tests/media/**/*.py"
-  - "frontend/**/*.ts"
-  - "frontend/**/*.tsx"
+  - "ingest_farm/**/*.py"
+  - "tests/**/*.py"
+  - "scripts/**/*.py"
+  - "web/**/*.ts"
+  - "web/**/*.tsx"
   - "**/*.md"
 alwaysApply: false
 ---

@@ -1,9 +1,9 @@
 ---
 description: GStreamer development rules for broadcast ingest pipelines
 globs:
-  - "backend/**/*.py"
-  - "tests/media/**/*.py"
-  - "**/*.gst"
+  - "ingest_farm/**/*.py"
+  - "tests/**/*.py"
+  - "scripts/**/*.py"
   - "**/*.sh"
 alwaysApply: false
 ---

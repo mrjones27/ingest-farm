@@ -11,7 +11,9 @@ The system consists of:
 
 - FastAPI control/API services
 - GStreamer-based ingest workers
+- a GStreamer-based postprocess service for proxies and thumbnails
 - PostgreSQL for persistent configuration and state
+- Redis for control-plane-to-worker jobs and ephemeral runtime stats
 - React + TypeScript + Vite frontend
 - Docker/Compose for development and deployment
 - Broadcast media protocols including RTP, UDP, SRT and MPEG-TS
@@ -49,21 +51,42 @@ Reconciliation between desired state and runtime state must be explicit.
 
 For example:
 
-    Database
+    PostgreSQL
        |
        | desired state
        v
-    Control Plane
+    Control Plane (FastAPI + Scheduler)
        |
+       | job on a Redis list
        v
-    Worker / Runtime Manager
+    Worker (IngestWorker -> ChannelSession)
        |
        v
     GStreamer
        |
-       | actual state
+       | actual state, as stats on a Redis key with a short TTL
        v
-    Monitoring
+    Monitoring / API
+
+## Control Plane to Worker Communication
+
+Redis is the sanctioned transport between the control plane and the workers. It
+is already part of the architecture, not something to be introduced or removed.
+
+Job queues are Redis lists. Queue names and access helpers are defined in
+`ingest_farm/common/events.py`. Treat that module as the source of truth and do
+not invent queue names or key formats.
+
+Redis holds transient data only: pending jobs, and ephemeral per-channel runtime
+stats under a short TTL. PostgreSQL holds all durable state.
+
+Never store durable state only in Redis.
+
+Jobs are fire-and-forget. There is no acknowledgement and no redelivery, so a
+worker that dies mid-job loses that job. Recovery is by reconciling database
+state on worker startup, not by replaying Redis.
+
+See `infrastructure/redis.mdc` for the full contract.
 
 ## Long-Running Operations
 

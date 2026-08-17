@@ -1,7 +1,7 @@
 ---
 description: FastAPI architecture and application-layer rules
 globs:
-  - "backend/**/*.py"
+  - "ingest_farm/**/*.py"
 alwaysApply: false
 ---
 
@@ -13,17 +13,25 @@ The FastAPI application is the control plane for the ingest farm.
 
 Use the following separation:
 
-    API Router
+    API Router  (ingest_farm/api/main.py)
         |
         v
-    Application Service
+    Application logic  (Scheduler, plus service modules where extracted)
         |
-        +----> Repository
+        +----> Persistence  (SQLAlchemy Session)
         |
-        +----> Runtime Manager
-        |
-        v
-    Domain/Application logic
+        +----> Runtime      (Redis job queue -> worker -> GStreamer)
+
+There is no repository layer and no generic service base class in this project.
+Do not add either.
+
+### Current State
+
+All routes currently live in one module, `ingest_farm/api/main.py`, and most
+handlers query the database directly through `Depends(get_db)`.
+
+That is accepted for straightforward CRUD. Do not begin a wholesale
+restructuring of the API module as a side effect of an unrelated change.
 
 ### Routers
 
@@ -35,43 +43,53 @@ Routers should contain HTTP concerns only:
 - HTTP status codes
 - dependency injection
 
-Routers should not contain:
+Simple, self-contained persistence inside a handler is acceptable.
 
-- GStreamer pipeline construction
-- database queries scattered throughout handlers
+Routers must not contain:
+
+- GStreamer pipeline construction, or any GStreamer import
+- direct job publication to Redis
 - long-running media operations
-- business logic
+- lifecycle or state-machine rules
 
-### Services
+### When to Extract a Service
 
-Services contain application behaviour.
+Move application logic out of the router into its own module when it:
 
-Examples:
+- spans more than one model, or needs more than one commit
+- enforces a state machine or a lifecycle rule
+- is required by more than one route
+- requests a runtime state change
 
-- create ingest
-- start ingest
-- stop ingest
-- restart ingest
-- assign ingest to worker
-- reconcile desired and runtime state
+`Scheduler` (`ingest_farm/orchestrator/scheduler.py`) is the existing example of
+this pattern. It owns channel lifecycle validation, rejects illegal status
+transitions, publishes the job and records the resulting intent. It raises
+`ValueError` for an invalid transition and the router translates that into an
+HTTP status code.
 
-### Repositories
+Follow that pattern. A service here is a plain module or class with explicit
+arguments that takes the `Session` as a parameter. It does not need a framework,
+a base class or a container.
 
-Repositories isolate persistence.
+### Persistence
 
-Do not spread raw SQL or database-specific logic throughout services.
+Use the SQLAlchemy `Session` directly.
+
+Do not add a repository abstraction to isolate it.
+
+Avoid raw SQL where the ORM is sufficient. Where SQL is genuinely required, keep
+it close to its use and explain why it is needed.
 
 ### Runtime
 
-The runtime layer owns interaction with GStreamer workers.
+The runtime boundary is the Redis job queue, published through `Scheduler`.
 
-It should provide explicit operations such as:
+The operations that exist are connect, disconnect, start recording and stop
+recording. Use those names rather than inventing a generic start/stop/restart
+surface.
 
-- start
-- stop
-- restart
-- status
-- health
+Routers may read runtime stats and check Redis health. Routers must not publish
+jobs directly.
 
 Do not expose GStreamer implementation details through HTTP handlers.
 
@@ -81,17 +99,19 @@ Do not assume that a successful API request means a pipeline is running.
 
 For example:
 
-    POST /ingests/123/start
+    POST /api/channels/{channel_id}/connect
 
-may mean:
+means the job was queued and the channel status is now `connecting`.
 
-    desired_state = RUNNING
+It does not mean that a GStreamer pipeline reached PLAYING, or that media is
+flowing. The worker sets `connected` only once the session is up, and `error` if
+it failed.
 
-It does not necessarily mean:
+Runtime state must be observed separately, through the per-channel stats the
+worker publishes.
 
-    runtime_state = PLAYING
-
-The runtime state must be observed separately.
+A 2xx response therefore acknowledges intent, not completion. Do not word
+responses, schemas or UI in a way that implies the pipeline is already running.
 
 ## Long-Running Operations
 

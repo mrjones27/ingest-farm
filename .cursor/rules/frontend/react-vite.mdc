@@ -1,8 +1,8 @@
 ---
 description: React, TypeScript and Vite frontend development rules
 globs:
-  - "frontend/**/*.ts"
-  - "frontend/**/*.tsx"
+  - "web/**/*.ts"
+  - "web/**/*.tsx"
 alwaysApply: false
 ---
 

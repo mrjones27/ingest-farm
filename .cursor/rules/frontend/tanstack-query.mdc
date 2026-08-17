@@ -1,12 +1,27 @@
 ---
 description: TanStack Query rules for server state and API communication
 globs:
-  - "frontend/**/*.ts"
-  - "frontend/**/*.tsx"
+  - "web/**/*.ts"
+  - "web/**/*.tsx"
 alwaysApply: false
 ---
 
 # TanStack Query
+
+## Status: planned, not yet adopted
+
+TanStack Query is not currently installed. It is not in `web/package.json`.
+
+The frontend currently uses `fetch` via `web/src/api/client.ts` and the
+`usePoll` hook in `web/src/hooks/usePoll.ts`.
+
+Do not write code against TanStack Query until it is added as a dependency
+and the migration is agreed. Until then, treat this file as the target design
+for server state, and follow the existing client and polling hook.
+
+The rules below apply once TanStack Query is adopted.
+
+## Server State
 
 Use TanStack Query for server state.
 

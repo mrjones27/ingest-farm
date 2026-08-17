@@ -1,8 +1,9 @@
 ---
 description: General Python engineering standards for the ingest farm
 globs:
-  - "backend/**/*.py"
+  - "ingest_farm/**/*.py"
   - "tests/**/*.py"
+  - "scripts/**/*.py"
 alwaysApply: false
 ---
 

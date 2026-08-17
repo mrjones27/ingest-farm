@@ -40,15 +40,33 @@ unless there is a concrete requirement for them.
 
 Existing abstractions should be reused where appropriate.
 
+### Already Part of the Architecture
+
+The list above means "do not add new ones". It does not mean that the existing
+components are violations to be removed.
+
+These already exist and are the sanctioned mechanisms:
+
+- Redis lists as the control-plane-to-worker job transport, and for ephemeral
+  runtime stats (`ingest_farm/common/events.py`)
+- `Scheduler` as the control-plane entry point for channel lifecycle
+  (`ingest_farm/orchestrator/scheduler.py`)
+- long-running worker and postprocess processes (`ingest_farm/worker/`,
+  `ingest_farm/postprocess/`)
+
+Use these rather than proposing a replacement or adding a parallel mechanism
+alongside them.
+
 ## Broadcast Systems
 
 Do not assume that a broadcast system requires distributed-system complexity.
 
-For example, do not introduce a message broker simply because ingest workers
-communicate with a control plane.
+For example, do not introduce a dedicated message broker such as Kafka or
+RabbitMQ simply because ingest workers communicate with a control plane. The
+existing Redis job queues already cover that need.
 
-First determine whether an existing HTTP/API, database or in-process mechanism
-is sufficient.
+First determine whether the existing Redis queues, HTTP API, database or an
+in-process mechanism is sufficient.
 
 ## Refactoring
 
