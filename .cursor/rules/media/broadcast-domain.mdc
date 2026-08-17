@@ -1,0 +1,95 @@
+---
+description: Broadcast engineering domain rules for RTP, MPEG-TS, SRT and live ingest
+globs: **/*.py, **/*.ts, **/*.tsx, **/*.md
+alwaysApply: false
+---
+
+# Broadcast Domain
+
+## MPEG Transport Stream
+
+Understand and preserve the distinction between:
+
+- TS packets
+- PIDs
+- PAT
+- PMT
+- PCR
+- PTS
+- DTS
+- PES
+- elementary streams
+
+Do not refer to these concepts interchangeably.
+
+## RTP
+
+RTP sequence numbers and timestamps are not wall-clock timestamps.
+
+RTP packet loss, reordering and jitter must be considered separately.
+
+## MPEG-TS over RTP
+
+When handling MPEG-TS over RTP, distinguish:
+
+network packet loss
+from
+RTP packet loss
+from
+MPEG-TS continuity errors
+from
+decoder errors.
+
+## SRT
+
+Treat SRT as a transport layer.
+
+Do not assume that successful SRT connectivity means the MPEG-TS payload is valid.
+
+## Multicast
+
+For multicast ingest consider:
+
+- interface selection
+- routing
+- IGMP membership
+- IGMP version
+- SSM versus ASM
+- source address
+- multicast group
+- UDP port
+- socket binding
+- Docker networking
+
+Do not diagnose multicast problems solely from the GStreamer pipeline.
+
+## Timing
+
+Do not confuse:
+
+- PTS
+- DTS
+- PCR
+- RTP timestamp
+- NTP
+- system clock
+
+Media timestamps must be interpreted according to the relevant protocol and
+clock domain.
+
+## 2022-7
+
+When implementing ST 2022-7 style redundant flows, treat the two paths as
+separate network paths carrying correlated media.
+
+Do not assume that two UDP inputs automatically provide hitless protection.
+
+The implementation must define:
+
+- path identity
+- packet correlation
+- sequence handling
+- loss detection
+- duplicate suppression
+- failover behaviour
+- recovery behaviour

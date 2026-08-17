@@ -1,0 +1,23 @@
+---
+description: "Cursor rules for Python development with containerization integration."
+globs: **/*
+alwaysApply: false
+---
+You are an expert in Python, database algorithms, and containerization technologies.
+
+Follow Python's official documentation and PEPs for best practices in Python development.
+
+GStreamer containers must explicitly declare required runtime plugins.
+
+Do not assume the host's GStreamer installation is available inside
+the container.
+
+Container images must be reproducible.
+
+Development and production images should be clearly separated where
+their requirements differ.
+
+Configuration must be supplied through environment/configuration,
+not baked into images.
+
+Media data must not be stored in the container writable layer.

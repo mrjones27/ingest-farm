@@ -1,0 +1,70 @@
+---
+description: Core architecture and engineering principles for the broadcast ingest farm
+alwaysApply: true
+---
+
+# Ingest Farm Project
+
+This project is a broadcast media ingest platform.
+
+The system consists of:
+
+- A FastAPI control/API service
+- GStreamer-based ingest workers
+- PostgreSQL for persistent configuration and state
+- A React + TypeScript + Vite frontend
+- Docker/Compose for development and deployment
+- Broadcast media protocols including RTP, UDP, SRT and MPEG-TS
+
+## Architecture
+
+Separate the system into:
+
+1. Control plane
+2. Ingest/runtime plane
+3. Persistence
+4. Monitoring/observability
+5. Frontend
+
+Do not place GStreamer implementation details directly inside FastAPI route handlers.
+
+API routes should call application services.
+
+Application services should interact with GStreamer through a defined runtime abstraction.
+
+## Engineering Principles
+
+- Prefer simple solutions.
+- Do not introduce abstractions without a demonstrated need.
+- Do not create distributed-system components unless the architecture requires them.
+- Do not replace existing technologies without explicit justification.
+- Preserve existing behaviour unless the requested change requires otherwise.
+- Make changes as small and local as reasonably possible.
+
+## Broadcast Engineering
+
+Treat media timing, packet loss, jitter, buffering and synchronisation as first-class concerns.
+
+Do not treat broadcast media as ordinary web traffic.
+
+When diagnosing ingest failures, consider the complete chain:
+
+NIC
+-> routing
+-> multicast/IGMP
+-> UDP socket
+-> GStreamer source
+-> depayloader/parser
+-> decoder
+-> downstream processing
+
+Do not assume that a pipeline failure is necessarily a GStreamer problem.
+
+## Validation
+
+Before claiming that a change works:
+
+- Run the relevant tests.
+- Validate configuration.
+- Validate GStreamer elements and properties against the installed version where applicable.
+- Do not claim a command or API works without evidence.
