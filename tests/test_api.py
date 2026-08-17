@@ -168,6 +168,29 @@ def test_channel_thumbnail_requires_live(
     assert resp.headers["content-type"].startswith("image/jpeg")
 
 
+def test_unqueueable_request_is_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 2xx must mean the job was queued, so an unreachable Redis is a 503."""
+    from ingest_farm.api import main as api_main
+    from ingest_farm.orchestrator.scheduler import JobPublishError
+
+    created = client.post(
+        "/api/channels",
+        json={
+            "name": "no-redis",
+            "source": {"protocol": "udp", "uri": "udp://0.0.0.0:5009"},
+        },
+    )
+    channel_id = created.json()["id"]
+
+    def _unqueueable(db: Session, channel_id: str) -> None:
+        raise JobPublishError("Could not queue job")
+
+    monkeypatch.setattr(api_main.scheduler, "connect_channel", _unqueueable)
+    response = client.post(f"/api/channels/{channel_id}/connect")
+    assert response.status_code == 503
+    assert client.get(f"/api/channels/{channel_id}").json()["status"] == "idle"
+
+
 def test_spa_does_not_shadow_api(client: TestClient) -> None:
     from ingest_farm.api.main import WEB_DIST
 
@@ -177,6 +200,11 @@ def test_spa_does_not_shadow_api(client: TestClient) -> None:
 
     docs = client.get("/docs")
     assert docs.status_code == 200
+
+    # An unknown API path must not answer with the SPA shell and a 200.
+    unknown = client.get("/api/does-not-exist")
+    assert unknown.status_code == 404
+    assert "text/html" not in unknown.headers["content-type"]
 
     if (WEB_DIST / "index.html").is_file():
         spa = client.get("/assets")

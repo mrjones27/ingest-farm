@@ -110,4 +110,7 @@ class LiveTeeStage(OutputStage):
         ctx["record_sink"] = sink
         ctx["record_idle_sink"] = idle_sink
         ctx["thumb_path"] = thumb_path
+        # Every protocol funnels through this tee, so its sink pad is the one
+        # place a caller can observe whether media is actually arriving.
+        ctx["live_tee"] = tee
         return idle_sink

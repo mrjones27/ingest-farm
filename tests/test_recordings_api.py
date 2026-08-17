@@ -149,6 +149,17 @@ def test_patch_asset_title_and_metadata(client_and_db, tmp_path, monkeypatch) ->
     assert body["metadata"]["segment_count"] == 1
 
 
+def test_delete_asset_blocked_while_recording(client_and_db, tmp_path, monkeypatch) -> None:
+    """Deleting the asset deletes the recording, so the same guard must apply."""
+    client, factory = client_and_db
+    monkeypatch.setattr(get_settings(), "storage_root", tmp_path)
+    _, asset_id, session_dir = _seed_recording(factory, tmp_path, status="recording")
+
+    response = client.delete(f"/api/assets/{asset_id}")
+    assert response.status_code == 400
+    assert session_dir.exists()
+
+
 def test_delete_asset_hard_deletes(client_and_db, tmp_path, monkeypatch) -> None:
     client, factory = client_and_db
     monkeypatch.setattr(get_settings(), "storage_root", tmp_path)

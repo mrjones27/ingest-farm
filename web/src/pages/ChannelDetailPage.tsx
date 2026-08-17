@@ -31,6 +31,11 @@ const LIVE = new Set([
 
 const IDLE = new Set(["idle", "error"]);
 
+// Mirrors Scheduler.stop_recording / start_recording: a stop is still valid
+// while stopping, and a record request is not.
+const STOPPABLE = new Set(["recording", "starting", "stopping"]);
+const RECORDABLE = new Set(["connected", "connecting"]);
+
 export function ChannelDetailPage() {
   const navigate = useNavigate();
   const { channelId } = useParams();
@@ -39,16 +44,16 @@ export function ChannelDetailPage() {
     1000,
     channelId,
   );
-  const { data: assets } = usePoll(
+  const { data: assets, error: assetsError } = usePoll(
     () => listAssets({ channel_id: channelId }),
     4000,
     channelId,
   );
-  const { data: recordings, reload: reloadRecordings } = usePoll(
-    () => listRecordings({ channel_id: channelId }),
-    4000,
-    channelId,
-  );
+  const {
+    data: recordings,
+    error: recordingsError,
+    reload: reloadRecordings,
+  } = usePoll(() => listRecordings({ channel_id: channelId }), 4000, channelId);
   const [busy, setBusy] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -61,11 +66,8 @@ export function ChannelDetailPage() {
 
   const live = LIVE.has(channel.status);
   const canModify = IDLE.has(channel.status);
-  const recording = channel.status === "recording" || channel.status === "starting";
-  const canRecord =
-    channel.status === "connected" ||
-    channel.status === "connecting" ||
-    channel.status === "stopping";
+  const recording = STOPPABLE.has(channel.status);
+  const canRecord = RECORDABLE.has(channel.status);
 
   const run = async (fn: (id: string) => Promise<unknown>) => {
     setBusy(true);
@@ -163,6 +165,17 @@ export function ChannelDetailPage() {
         </div>
       </div>
       {actionError && <p className="text-sm text-signal-err">{actionError}</p>}
+      {/* Never present a stale status as current runtime state. */}
+      {error && (
+        <p className="text-sm text-signal-warn">
+          Status refresh failed ({error}) — showing last known state.
+        </p>
+      )}
+      {(assetsError || recordingsError) && (
+        <p className="text-sm text-signal-warn">
+          Recordings and assets may be out of date ({recordingsError ?? assetsError}).
+        </p>
+      )}
 
       <section className="panel overflow-hidden">
         <LiveThumb

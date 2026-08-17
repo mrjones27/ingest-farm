@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse, Response
+from redis import RedisError
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, contains_eager, joinedload
 
 from ingest_farm.common.cleanup import delete_recording_media
-from ingest_farm.common.events import get_channel_stats, get_redis
+from ingest_farm.common.events import get_channel_stats, get_channel_stats_many, get_redis
+from ingest_farm.config import get_settings
 from ingest_farm.db import get_db, get_engine
 from ingest_farm.models import Asset, Channel, Recording, Worker
-from ingest_farm.orchestrator.scheduler import Scheduler
+from ingest_farm.orchestrator.scheduler import JobPublishError, Scheduler
 from ingest_farm.pipeline.encoders.registry import default_registry
 from ingest_farm.schemas import (
     AssetResponse,
@@ -28,6 +33,8 @@ from ingest_farm.schemas import (
     SourceConfig,
     WorkerResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 health_router = APIRouter()
 router = APIRouter()
@@ -50,6 +57,10 @@ def _mount_spa(app: FastAPI) -> None:
         return
 
     def _spa_file(full_path: str) -> FileResponse:
+        # This catch-all is registered after the API routers, so without this
+        # guard an unknown /api path would answer with index.html and a 200.
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
         dist_root = WEB_DIST.resolve()
         if full_path:
             candidate = (WEB_DIST / full_path).resolve()
@@ -66,15 +77,18 @@ def _mount_spa(app: FastAPI) -> None:
         return _spa_file(full_path)
 
 
+_LIVE_CHANNEL_STATUSES = {
+    "connected",
+    "recording",
+    "connecting",
+    "starting",
+    "stopping",
+    "disconnecting",
+}
+
+
 def _channel_urls(channel: Channel, stats: dict | None = None) -> dict[str, str | None]:
-    live = channel.status in {
-        "connected",
-        "recording",
-        "connecting",
-        "starting",
-        "stopping",
-        "disconnecting",
-    }
+    live = channel.status in _LIVE_CHANNEL_STATUSES
     # Don't advertise thumbnail when SRT child fell back to fakesink preview.
     preview = (stats or {}).get("preview")
     if channel.protocol == "srt" and preview == "fakesink":
@@ -91,22 +105,23 @@ def _pipeline_from_db(profile: dict | None) -> PipelineConfig:
     return PipelineConfig(**data)
 
 
-def _channel_response(channel: Channel) -> ChannelResponse:
+def _channel_response(
+    channel: Channel,
+    stats_cache: dict[str, dict | None] | None = None,
+) -> ChannelResponse:
     profile = channel.pipeline_profile or {}
     output = channel.output_config or {}
     stats = None
-    if channel.status in {
-        "connected",
-        "recording",
-        "connecting",
-        "starting",
-        "stopping",
-        "disconnecting",
-    }:
-        try:
-            stats = get_channel_stats(channel.id)
-        except Exception:
-            stats = None
+    if channel.status in _LIVE_CHANNEL_STATUSES:
+        if stats_cache is not None:
+            stats = stats_cache.get(channel.id)
+        else:
+            # Runtime stats are best-effort: a channel listing must still work
+            # when Redis does not.
+            try:
+                stats = get_channel_stats(channel.id)
+            except RedisError:
+                logger.warning("Could not read stats for channel %s", channel.id, exc_info=True)
     return ChannelResponse(
         id=channel.id,
         name=channel.name,
@@ -191,6 +206,32 @@ def _delete_recording(db: Session, recording: Recording) -> None:
     db.delete(recording)
 
 
+def _channel_action(
+    db: Session,
+    channel_id: str,
+    action: Callable[[Session, str], None],
+) -> ChannelResponse:
+    """Request a lifecycle change and report the resulting intent.
+
+    A 2xx here means the job was queued and the status is transitional, not
+    that a pipeline is running.
+    """
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        action(db, channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except JobPublishError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Job queue unavailable; the request was not accepted",
+        ) from exc
+    db.refresh(channel)
+    return _channel_response(channel)
+
+
 def _safe_under(root: Path, candidate: Path) -> Path:
     root = root.resolve()
     target = candidate.resolve()
@@ -203,20 +244,21 @@ def _safe_under(root: Path, candidate: Path) -> Path:
 
 @health_router.get("/health")
 def health() -> dict:
+    # Exception text from these clients carries host, port and user, so it is
+    # logged rather than returned to an unauthenticated caller.
     checks: dict[str, str] = {"api": "ok"}
     try:
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
         checks["database"] = "ok"
-    except Exception as exc:
-        checks["database"] = f"error: {exc}"
+    except SQLAlchemyError:
+        logger.warning("Health check: database unreachable", exc_info=True)
+        checks["database"] = "error"
     try:
-        if get_redis(socket_timeout=2).ping():
-            checks["redis"] = "ok"
-        else:
-            checks["redis"] = "error: ping failed"
-    except Exception as exc:
-        checks["redis"] = f"error: {exc}"
+        checks["redis"] = "ok" if get_redis(socket_timeout=2).ping() else "error"
+    except RedisError:
+        logger.warning("Health check: redis unreachable", exc_info=True)
+        checks["redis"] = "error"
 
     status = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     return {"status": status, "checks": checks}
@@ -253,7 +295,14 @@ def create_channel(payload: ChannelCreate, db: Session = Depends(get_db)) -> Cha
 
 @router.get("/channels", response_model=list[ChannelResponse])
 def list_channels(db: Session = Depends(get_db)) -> list[ChannelResponse]:
-    return [_channel_response(c) for c in db.query(Channel).order_by(Channel.created_at.desc())]
+    channels = list(db.query(Channel).order_by(Channel.created_at.desc()))
+    live_ids = [c.id for c in channels if c.status in _LIVE_CHANNEL_STATUSES]
+    stats_cache: dict[str, dict | None] = {}
+    try:
+        stats_cache = get_channel_stats_many(live_ids)
+    except RedisError:
+        logger.warning("Could not read channel stats for listing", exc_info=True)
+    return [_channel_response(c, stats_cache) for c in channels]
 
 
 @router.get("/channels/{channel_id}", response_model=ChannelResponse)
@@ -317,60 +366,26 @@ def delete_channel(channel_id: str, db: Session = Depends(get_db)) -> Response:
 
 @router.post("/channels/{channel_id}/connect", response_model=ChannelResponse)
 def connect_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
-    channel = db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        scheduler.connect_channel(db, channel_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    db.refresh(channel)
-    return _channel_response(channel)
+    return _channel_action(db, channel_id, scheduler.connect_channel)
 
 
 @router.post("/channels/{channel_id}/disconnect", response_model=ChannelResponse)
 def disconnect_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
-    channel = db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        scheduler.disconnect_channel(db, channel_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    db.refresh(channel)
-    return _channel_response(channel)
+    return _channel_action(db, channel_id, scheduler.disconnect_channel)
 
 
 @router.post("/channels/{channel_id}/record/start", response_model=ChannelResponse)
 def record_start(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
-    channel = db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        scheduler.start_recording(db, channel_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    db.refresh(channel)
-    return _channel_response(channel)
+    return _channel_action(db, channel_id, scheduler.start_recording)
 
 
 @router.post("/channels/{channel_id}/record/stop", response_model=ChannelResponse)
 def record_stop(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
-    channel = db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        scheduler.stop_recording(db, channel_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    db.refresh(channel)
-    return _channel_response(channel)
+    return _channel_action(db, channel_id, scheduler.stop_recording)
 
 
 @router.get("/channels/{channel_id}/thumbnail")
 def channel_thumbnail(channel_id: str, db: Session = Depends(get_db)) -> FileResponse:
-    from ingest_farm.config import get_settings
-
     channel = db.get(Channel, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -404,37 +419,22 @@ def channel_stats(channel_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="Channel not found")
     try:
         stats = get_channel_stats(channel_id) or {}
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Stats unavailable: {exc}") from exc
+    except RedisError as exc:
+        logger.warning("Stats read failed for channel %s", channel_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Stats unavailable") from exc
     return {"channel_id": channel_id, "status": channel.status, "stats": stats}
 
 
 @router.post("/channels/{channel_id}/start", response_model=ChannelResponse)
 def start_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
     """Legacy: connect (if needed) and start recording."""
-    channel = db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        scheduler.start_recording(db, channel_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    db.refresh(channel)
-    return _channel_response(channel)
+    return _channel_action(db, channel_id, scheduler.start_recording)
 
 
 @router.post("/channels/{channel_id}/stop", response_model=ChannelResponse)
 def stop_channel(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
     """Legacy: stop recording (stays connected if session is up)."""
-    channel = db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        scheduler.stop_recording(db, channel_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    db.refresh(channel)
-    return _channel_response(channel)
+    return _channel_action(db, channel_id, scheduler.stop_recording)
 
 
 def _query_recordings(
@@ -596,6 +596,7 @@ def update_asset(
 
 @router.delete("/assets/{asset_id}", status_code=204)
 def delete_asset(asset_id: str, db: Session = Depends(get_db)) -> Response:
+    """Deletes the asset together with its recording and media on disk."""
     asset = db.get(Asset, asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -604,6 +605,8 @@ def delete_asset(asset_id: str, db: Session = Depends(get_db)) -> Response:
         db.delete(asset)
         db.commit()
         return Response(status_code=204)
+    if recording.status == RecordingStatus.RECORDING.value:
+        raise HTTPException(status_code=400, detail="Cannot delete an active recording")
     _delete_recording(db, recording)
     db.commit()
     return Response(status_code=204)
@@ -614,9 +617,7 @@ def download_master(asset_id: str, db: Session = Depends(get_db)) -> FileRespons
     asset = db.get(Asset, asset_id)
     if asset is None or not asset.master_path:
         raise HTTPException(status_code=404, detail="Master not found")
-    path = Path(asset.master_path)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Master file missing on disk")
+    path = _safe_under(get_settings().storage_root, Path(asset.master_path))
     return FileResponse(path, media_type="video/mp2t", filename=path.name)
 
 
@@ -625,9 +626,7 @@ def get_thumbnail(asset_id: str, db: Session = Depends(get_db)) -> FileResponse:
     asset = db.get(Asset, asset_id)
     if asset is None or not asset.thumbnail_path:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
-    path = Path(asset.thumbnail_path)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Thumbnail file missing on disk")
+    path = _safe_under(get_settings().storage_root, Path(asset.thumbnail_path))
     return FileResponse(path, media_type="image/jpeg", filename=path.name)
 
 

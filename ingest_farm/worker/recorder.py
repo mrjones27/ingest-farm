@@ -15,6 +15,11 @@ from ingest_farm.schemas import ChannelConfig, new_id
 
 logger = logging.getLogger(__name__)
 
+# A source is only "receiving" while packets are actually arriving. A longer gap
+# than this means the encoder went away, even if it never sent EOS. Matches the
+# SRT child process so both paths report the same thing.
+_RECEIVING_IDLE_SEC = 2.0
+
 
 class ChannelSession:
     """Live channel session: connect (source + preview) separate from recording.
@@ -51,6 +56,13 @@ class ChannelSession:
         self._srt_state_dir: Path | None = None
         self._preview_mode: str = "fakesink"
         self._segment_duration_sec: int = 3600
+        self._bus = None
+        self._error: str | None = None
+        self._eos = False
+        self._pipeline_state = "NULL"
+        self._buffer_count = 0
+        self._bytes_total = 0
+        self._last_buffer_at = 0.0
 
     @property
     def session_id(self) -> str:
@@ -76,7 +88,26 @@ class ChannelSession:
     def is_connected(self) -> bool:
         if self._srt_proc is not None:
             return self._srt_proc.poll() is None
+        # A pipeline object says nothing about pipeline health; the bus does.
+        if self._error is not None or self._eos:
+            return False
         return self._pipeline is not None
+
+    @property
+    def end_reason(self) -> str | None:
+        """Why the session stopped being usable, for operator-facing logs."""
+        if self._error is not None:
+            return self._error
+        if self._eos:
+            return "end of stream"
+        return None
+
+    @property
+    def is_receiving(self) -> bool:
+        """True only while buffers are actually arriving from the source."""
+        if self._buffer_count == 0:
+            return False
+        return (time.monotonic() - self._last_buffer_at) < _RECEIVING_IDLE_SEC
 
     @property
     def is_recording(self) -> bool:
@@ -108,15 +139,26 @@ class ChannelSession:
                 except OSError:
                     pass
             with self._stats_lock:
-                if not self._stats:
-                    self._stats = {
-                        "available": True,
-                        "protocol": str(self._source_kind or "unknown"),
-                        "receiving": True,
-                        "preview": "jpeg",
-                    }
+                self._stats = self._live_stats()
         with self._stats_lock:
             return dict(self._stats)
+
+    def _live_stats(self) -> dict[str, Any]:
+        """Observed state of the in-process pipeline, not assumed state."""
+        stats: dict[str, Any] = {
+            "available": True,
+            "protocol": str(self._source_kind or "unknown"),
+            "receiving": self.is_receiving,
+            "preview": self._preview_mode,
+            "pipeline-state": self._pipeline_state,
+            "bytes-received-total": self._bytes_total,
+            "buffer-count": self._buffer_count,
+        }
+        if self._error is not None:
+            stats["error"] = self._error
+        if self._eos:
+            stats["eos"] = True
+        return stats
 
     def connect(self, config: ChannelConfig, preview_dir: Path) -> None:
         if self.is_connected:
@@ -128,6 +170,12 @@ class ChannelSession:
         self._recording = False
         with self._stats_lock:
             self._stats = {}
+        self._error = None
+        self._eos = False
+        self._pipeline_state = "NULL"
+        self._buffer_count = 0
+        self._bytes_total = 0
+        self._last_buffer_at = 0.0
         self._srt_has_data = False
         self._source_kind = config.source.protocol
         self._segment_duration_sec = config.pipeline.segment_duration_sec
@@ -150,21 +198,85 @@ class ChannelSession:
         self._source = ctx.get("source_element")
         self._source_kind = ctx.get("source_kind") or config.source.protocol
         self._preview_mode = ctx.get("preview_mode", "jpeg")
+
+        # Watch the bus before PLAYING: set_state returns ASYNC for live
+        # sources, so failures surface here rather than in the return value.
+        self._bus = self._pipeline.get_bus()
+        self._bus.add_signal_watch()
+        self._bus.connect("message", self._on_bus_message)
+        self._attach_receive_probe(ctx.get("live_tee"), Gst)
+
         ret = self._pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
-            self._pipeline = None
+            self._teardown()
             raise RuntimeError("Failed to start GStreamer pipeline")
         self._loop = None
         self._thread = None
         self._stats_timeout_id = None
         with self._stats_lock:
-            self._stats = {
-                "available": True,
-                "protocol": str(self._source_kind),
-                "receiving": True,
-                "preview": self._preview_mode,
-            }
-        logger.info("Channel %s connected → preview %s", config.name, preview_dir)
+            self._stats = self._live_stats()
+        logger.info(
+            "Channel %s connected → preview %s (set_state=%s)",
+            config.name,
+            preview_dir,
+            ret.value_nick,
+        )
+
+    def _attach_receive_probe(self, tee: Any, gst: Any) -> None:
+        if tee is None:
+            logger.warning(
+                "Channel %s has no live tee — cannot observe whether media arrives",
+                self._channel_name,
+            )
+            return
+        pad = tee.get_static_pad("sink")
+        if pad is None:
+            logger.warning("Channel %s live tee has no sink pad", self._channel_name)
+            return
+        # Runs on a streaming thread for every buffer, so keep the lookups out.
+        probe_ok = gst.PadProbeReturn.OK
+
+        def _on_buffer(_pad: Any, info: Any) -> Any:
+            buf = info.get_buffer()
+            self._buffer_count += 1
+            self._bytes_total += buf.get_size() if buf is not None else 0
+            self._last_buffer_at = time.monotonic()
+            return probe_ok
+
+        pad.add_probe(gst.PadProbeType.BUFFER, _on_buffer)
+
+    def _on_bus_message(self, _bus: Any, message: Any) -> bool:
+        from gi.repository import Gst
+
+        src_name = message.src.get_name() if message.src is not None else "unknown"
+        if message.type == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            self._error = f"{src_name}: {err.message}"
+            logger.error(
+                "Channel %s pipeline ERROR from %s: %s (debug=%s, state=%s)",
+                self._channel_name,
+                src_name,
+                err.message,
+                debug,
+                self._pipeline_state,
+            )
+        elif message.type == Gst.MessageType.WARNING:
+            err, debug = message.parse_warning()
+            logger.warning(
+                "Channel %s pipeline WARNING from %s: %s (debug=%s)",
+                self._channel_name,
+                src_name,
+                err.message,
+                debug,
+            )
+        elif message.type == Gst.MessageType.EOS:
+            self._eos = True
+            logger.info("Channel %s pipeline EOS — source ended", self._channel_name)
+        elif message.type == Gst.MessageType.STATE_CHANGED:
+            if self._pipeline is not None and message.src is self._pipeline:
+                _old, new, _pending = message.parse_state_changed()
+                self._pipeline_state = Gst.Element.state_get_name(new)
+        return True
 
     def _connect_srt_child(self, config: ChannelConfig, preview_dir: Path) -> None:
         state_dir = preview_dir / "_srt_session"
@@ -302,7 +414,13 @@ class ChannelSession:
         if self._srt_proc is not None:
             try:
                 self._srt_send_cmd("stop")
-                self._wait_srt_recording(False, timeout_sec=3.0)
+                if not self._wait_srt_recording(False, timeout_sec=3.0):
+                    # The capture may be truncated or still writing; the caller
+                    # will still mark the recording completed.
+                    logger.warning(
+                        "Channel %s SRT child did not acknowledge record stop",
+                        self._channel_name,
+                    )
             except Exception:
                 logger.exception("Failed to send stop to SRT child")
         elif self._valve is not None:
@@ -367,6 +485,12 @@ class ChannelSession:
         if self._stats_timeout_id is not None:
             GLib.source_remove(self._stats_timeout_id)
             self._stats_timeout_id = None
+
+        if self._bus is not None:
+            # Leaving the watch attached keeps a source on the default main
+            # context after the pipeline is gone.
+            self._bus.remove_signal_watch()
+            self._bus = None
 
         if self._pipeline is None:
             with self._stats_lock:

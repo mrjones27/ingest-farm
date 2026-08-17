@@ -24,47 +24,57 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/** FastAPI sends 422 detail as a list of validation errors, not a string. */
+function formatDetail(raw: unknown): string | null {
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw)) {
+    const parts = raw
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+        if (typeof msg !== "string") return null;
+        const field = Array.isArray(loc)
+          ? loc.filter((part) => part !== "body").join(".")
+          : "";
+        return field ? `${field}: ${msg}` : msg;
+      })
+      .filter((part): part is string => part !== null);
+    if (parts.length > 0) return parts.join("; ");
+  }
+  return null;
+}
+
+async function errorDetail(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (body && typeof body === "object" && "detail" in body) {
+      return formatDetail((body as { detail: unknown }).detail) ?? response.statusText;
+    }
+  } catch {
+    /* non-JSON error body */
+  }
+  return response.statusText;
+}
+
+async function send(url: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const response = await fetch(url, { ...init, headers });
   if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const body: unknown = await response.json();
-      if (body && typeof body === "object" && "detail" in body) {
-        const raw = (body as { detail: unknown }).detail;
-        detail = typeof raw === "string" ? raw : JSON.stringify(raw);
-      }
-    } catch {
-      /* ignore parse errors */
-    }
-    throw new ApiError(response.status, detail);
+    throw new ApiError(response.status, await errorDetail(response));
   }
+  return response;
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await send(url, init);
   return (await response.json()) as T;
 }
 
 async function requestVoid(url: string, init?: RequestInit): Promise<void> {
-  const headers = new Headers(init?.headers);
-  if (init?.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  const response = await fetch(url, { ...init, headers });
-  if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const body: unknown = await response.json();
-      if (body && typeof body === "object" && "detail" in body) {
-        const raw = (body as { detail: unknown }).detail;
-        detail = typeof raw === "string" ? raw : JSON.stringify(raw);
-      }
-    } catch {
-      /* ignore parse errors */
-    }
-    throw new ApiError(response.status, detail);
-  }
+  await send(url, init);
 }
 
 export function getHealth(): Promise<HealthStatus> {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from redis import RedisError
+
 from ingest_farm.common.events import (
     CHANNEL_CONNECT_QUEUE,
     CHANNEL_DISCONNECT_QUEUE,
@@ -15,6 +17,10 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
+class JobPublishError(RuntimeError):
+    """The job could not be queued, so the state change was not accepted."""
+
+
 class Scheduler:
     """Assigns channel connect/record jobs via Redis.
 
@@ -22,6 +28,33 @@ class Scheduler:
     shared queues. ``worker_hint`` is not used for routing (farm scheduling is
     a future pass).
     """
+
+    def _commit_then_publish(
+        self,
+        db: Session,
+        channel: Channel,
+        queue: str,
+        payload: dict,
+        new_status: str | None,
+    ) -> None:
+        """Record the intent before queueing, and undo it if queueing fails.
+
+        Publishing first lets a fast worker write achieved state (``connected``,
+        ``idle``) that the intent commit then overwrites, stranding the channel
+        in a transitional status.
+        """
+        previous = channel.status
+        if new_status is not None:
+            channel.status = new_status
+            db.commit()
+        try:
+            publish_event(queue, payload)
+        except RedisError as exc:
+            if new_status is not None:
+                channel.status = previous
+                db.commit()
+            logger.error("Failed to queue %s for channel %s: %s", queue, channel.id, exc)
+            raise JobPublishError(f"Could not queue job on {queue}") from exc
 
     def connect_channel(self, db: Session, channel_id: str) -> None:
         channel = db.get(Channel, channel_id)
@@ -35,12 +68,13 @@ class Scheduler:
             logger.warning("No workers registered yet; queueing connect for %s anyway", channel_id)
 
         # worker_hint is informational only (single-worker deployments).
-        publish_event(
+        self._commit_then_publish(
+            db,
+            channel,
             CHANNEL_CONNECT_QUEUE,
             {"channel_id": channel_id, "worker_hint": worker.hostname if worker else None},
+            "connecting",
         )
-        channel.status = "connecting"
-        db.commit()
         logger.info("Queued connect for channel %s", channel_id)
 
     def disconnect_channel(self, db: Session, channel_id: str) -> None:
@@ -57,9 +91,13 @@ class Scheduler:
         }:
             raise ValueError(f"Channel {channel_id} is not active (status={channel.status})")
 
-        publish_event(CHANNEL_DISCONNECT_QUEUE, {"channel_id": channel_id})
-        channel.status = "disconnecting"
-        db.commit()
+        self._commit_then_publish(
+            db,
+            channel,
+            CHANNEL_DISCONNECT_QUEUE,
+            {"channel_id": channel_id},
+            "disconnecting",
+        )
         logger.info("Queued disconnect for channel %s", channel_id)
 
     def start_recording(self, db: Session, channel_id: str) -> None:
@@ -75,10 +113,15 @@ class Scheduler:
                 f"Channel {channel_id} must be connected before recording (status={channel.status})"
             )
 
-        publish_event(CHANNEL_RECORD_START_QUEUE, {"channel_id": channel_id})
-        if channel.status == "connected":
-            channel.status = "starting"
-            db.commit()
+        # Only "connected" has an intent to record; connecting/starting already
+        # carry one, so leave those statuses alone.
+        self._commit_then_publish(
+            db,
+            channel,
+            CHANNEL_RECORD_START_QUEUE,
+            {"channel_id": channel_id},
+            "starting" if channel.status == "connected" else None,
+        )
         logger.info("Queued record start for channel %s", channel_id)
 
     def stop_recording(self, db: Session, channel_id: str) -> None:
@@ -88,9 +131,13 @@ class Scheduler:
         if channel.status not in {"recording", "starting", "stopping"}:
             raise ValueError(f"Channel {channel_id} is not recording (status={channel.status})")
 
-        publish_event(CHANNEL_RECORD_STOP_QUEUE, {"channel_id": channel_id})
-        channel.status = "stopping"
-        db.commit()
+        self._commit_then_publish(
+            db,
+            channel,
+            CHANNEL_RECORD_STOP_QUEUE,
+            {"channel_id": channel_id},
+            "stopping",
+        )
         logger.info("Queued record stop for channel %s", channel_id)
 
     # Back-compat names used by older API routes.

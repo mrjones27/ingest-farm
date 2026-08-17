@@ -22,15 +22,37 @@ export function LiveThumb({
       return;
     }
     let cancelled = false;
+    let id: number | undefined;
     const tick = () => {
       if (cancelled) return;
       setSrc(`${url}?t=${Date.now()}`);
     };
+    const start = () => {
+      if (id === undefined) id = window.setInterval(tick, 1000);
+    };
+    const stop = () => {
+      if (id !== undefined) {
+        window.clearInterval(id);
+        id = undefined;
+      }
+    };
+    // One request per second per live channel is wasted on a hidden tab.
+    const onVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        tick();
+        start();
+      }
+    };
+
     tick();
-    const id = window.setInterval(tick, 1000);
+    if (!document.hidden) start();
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [url]);
 

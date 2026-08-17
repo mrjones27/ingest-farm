@@ -29,6 +29,11 @@ const LIVE = new Set([
 
 const IDLE = new Set(["idle", "error"]);
 
+// Mirrors Scheduler.stop_recording / start_recording: a stop is still valid
+// while stopping, and a record request is not.
+const STOPPABLE = new Set(["recording", "starting", "stopping"]);
+const RECORDABLE = new Set(["connected", "connecting"]);
+
 function ChannelActions({
   channel,
   busyId,
@@ -51,11 +56,8 @@ function ChannelActions({
   const busy = busyId === channel.id;
   const live = LIVE.has(channel.status);
   const canModify = IDLE.has(channel.status);
-  const recording = channel.status === "recording" || channel.status === "starting";
-  const canRecord =
-    channel.status === "connected" ||
-    channel.status === "connecting" ||
-    channel.status === "stopping";
+  const recording = STOPPABLE.has(channel.status);
+  const canRecord = RECORDABLE.has(channel.status);
 
   return (
     <div className="flex flex-wrap justify-end gap-2">

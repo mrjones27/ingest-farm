@@ -67,8 +67,7 @@ class IngestWorker:
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
         logger.info("Worker %s starting (capacity=%s)", self.worker_id, self.settings.worker_capacity)
-        self._register_worker()
-        self._reconcile_orphaned_channels()
+        self._startup()
         self._loop = GLib.MainLoop()
 
         def _connect_jobs() -> None:
@@ -80,6 +79,15 @@ class IngestWorker:
         threading.Thread(target=_connect_jobs, daemon=True, name="connect-jobs").start()
         GLib.timeout_add_seconds(1, self._glib_tick)
         self._loop.run()
+
+    def _startup(self) -> None:
+        """Recover from a previous run, then claim this worker's slot.
+
+        Order matters: _register_worker overwrites active_channels with the
+        (empty) live session set, which is the very list reconciliation reads.
+        """
+        self._reconcile_orphaned_channels()
+        self._register_worker()
 
     def _idle_connect(self, job: dict) -> bool:
         try:
@@ -101,15 +109,57 @@ class IngestWorker:
         return True
 
     def _drain_control_queues(self) -> None:
-        for queue, handler in (
-            (CHANNEL_DISCONNECT_QUEUE, self._handle_disconnect),
-            (CHANNEL_RECORD_STOP_QUEUE, self._handle_record_stop),
-            (CHANNEL_RECORD_START_QUEUE, self._handle_record_start),
+        """Apply pending control jobs, resolving conflicts per channel.
+
+        Each op has its own Redis list, so relative order between lists is not
+        preserved. Collect the whole batch first and let the channel's stored
+        status — the last intent the control plane accepted — decide which of a
+        conflicting start/stop to apply.
+        """
+        pending: dict[str, list[str]] = {}
+        for queue, op in (
+            (CHANNEL_DISCONNECT_QUEUE, "disconnect"),
+            (CHANNEL_RECORD_STOP_QUEUE, "stop"),
+            (CHANNEL_RECORD_START_QUEUE, "start"),
         ):
             job = try_pop(queue)
             while job:
-                handler(job)
+                channel_id = job.get("channel_id")
+                if channel_id:
+                    ops = pending.setdefault(channel_id, [])
+                    if op not in ops:
+                        ops.append(op)
+                else:
+                    logger.warning("Discarding %s job without channel_id: %r", op, job)
                 job = try_pop(queue)
+
+        handlers = {
+            "disconnect": self._handle_disconnect,
+            "stop": self._handle_record_stop,
+            "start": self._handle_record_start,
+        }
+        for channel_id, ops in pending.items():
+            for op in self._resolve_ops(channel_id, ops):
+                handlers[op]({"channel_id": channel_id})
+
+    def _resolve_ops(self, channel_id: str, ops: list[str]) -> list[str]:
+        """Collapse one tick's ops for a channel into what should actually run."""
+        if "disconnect" in ops:
+            # Teardown supersedes record ops, and it finalises any recording.
+            return ["disconnect"]
+        if "start" in ops and "stop" in ops:
+            with get_session_factory()() as db:
+                channel = db.get(Channel, channel_id)
+                status = channel.status if channel else None
+            winner = "stop" if status == "stopping" else "start"
+            logger.info(
+                "Channel %s had start and stop queued together (status=%s) → applying %s",
+                channel_id,
+                status,
+                winner,
+            )
+            return [winner]
+        return ops
 
     def _register_worker(self) -> None:
         with get_session_factory()() as db:
@@ -120,6 +170,25 @@ class IngestWorker:
             worker.last_heartbeat = datetime.now(timezone.utc)
             worker.active_channels = list(self._sessions.keys())
             db.commit()
+
+    def _fail_active_recording(self, db, channel_id: str) -> bool:
+        """Mark the channel's in-flight recording failed. Caller commits.
+
+        A recording row left at ``recording`` is never picked up again: nothing
+        finalises it and the API refuses to delete it.
+        """
+        recording = (
+            db.query(Recording)
+            .filter_by(channel_id=channel_id, status=RecordingStatus.RECORDING.value)
+            .order_by(Recording.started_at.desc())
+            .first()
+        )
+        if recording is None:
+            return False
+        recording.status = RecordingStatus.FAILED.value
+        recording.ended_at = datetime.now(timezone.utc)
+        logger.warning("Recording %s for channel %s marked failed", recording.id, channel_id)
+        return True
 
     def _reconcile_orphaned_channels(self) -> None:
         """Reset channels this worker previously claimed but no longer holds.
@@ -145,15 +214,7 @@ class IngestWorker:
                 old = channel.status
                 channel.status = "idle"
                 cleared.append(f"{channel.name}:{old}")
-                recording = (
-                    db.query(Recording)
-                    .filter_by(channel_id=channel.id, status=RecordingStatus.RECORDING.value)
-                    .order_by(Recording.started_at.desc())
-                    .first()
-                )
-                if recording:
-                    recording.status = RecordingStatus.FAILED.value
-                    recording.ended_at = datetime.now(timezone.utc)
+                self._fail_active_recording(db, channel.id)
             if worker is not None:
                 worker.active_channels = [
                     cid for cid in (worker.active_channels or []) if cid in self._sessions
@@ -163,6 +224,13 @@ class IngestWorker:
                 logger.warning("Reconciled orphaned channels → idle: %s", cleared)
             elif worker is not None:
                 db.commit()
+
+    def _clear_stats(self, channel_id: str) -> None:
+        """Best-effort: an unreachable Redis must not abort a status update."""
+        try:
+            clear_channel_stats(channel_id)
+        except Exception:
+            logger.warning("Failed to clear stats for %s", channel_id, exc_info=True)
 
     def _heartbeat(self) -> None:
         with get_session_factory()() as db:
@@ -183,11 +251,18 @@ class IngestWorker:
                 self._sessions.pop(channel_id, None)
                 self._recording_ids.pop(channel_id, None)
                 self._pending_record.discard(channel_id)
-                clear_channel_stats(channel_id)
+                self._clear_stats(channel_id)
+                # The session is already gone, so nothing will finalise its
+                # recording later — do it here or the row stays "recording".
+                self._fail_active_recording(db, channel_id)
                 ch = db.get(Channel, channel_id)
                 if ch and ch.status in ACTIVE_STATUSES:
                     ch.status = "error"
-                    logger.warning("Channel %s session ended unexpectedly → error", channel_id)
+                    logger.warning(
+                        "Channel %s session ended (%s) → error",
+                        channel_id,
+                        session.end_reason or "reason unknown",
+                    )
             db.commit()
 
     def _handle_connect(self, job: dict) -> None:
@@ -251,7 +326,7 @@ class IngestWorker:
             if session.is_recording:
                 self._finalize_recording(channel_id, session, completed=True)
             session.disconnect()
-        clear_channel_stats(channel_id)
+        self._clear_stats(channel_id)
         with get_session_factory()() as db:
             channel = db.get(Channel, channel_id)
             if channel and channel.status in ACTIVE_STATUSES:
@@ -307,11 +382,13 @@ class IngestWorker:
         self._pending_record.discard(channel_id)
         session = self._sessions.get(channel_id)
         if session is None:
+            # No session to stop, so any recording row for it is unfinishable.
             with get_session_factory()() as db:
                 channel = db.get(Channel, channel_id)
                 if channel and channel.status in {"stopping", "recording", "starting"}:
                     channel.status = "idle"
-                    db.commit()
+                self._fail_active_recording(db, channel_id)
+                db.commit()
             return
 
         self._finalize_recording(channel_id, session, completed=True)

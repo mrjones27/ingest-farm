@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from ingest_farm.api.main import create_app
+from ingest_farm.config import get_settings
 from ingest_farm.db import get_db
 from ingest_farm.models import Asset, Base, Channel, Recording
 from ingest_farm.schemas import new_id
@@ -37,8 +38,10 @@ def client_and_db(tmp_path: Path) -> Generator[tuple[TestClient, sessionmaker], 
         yield test_client, factory
 
 
-def test_asset_media_serving(client_and_db, tmp_path: Path) -> None:
+def test_asset_media_serving(client_and_db, tmp_path: Path, monkeypatch) -> None:
     client, factory = client_and_db
+    # Served media must live under the storage root, as it does in deployment.
+    monkeypatch.setattr(get_settings(), "storage_root", tmp_path)
 
     master = tmp_path / "segment_00000.ts"
     master.write_bytes(b"\x47" + b"\x00" * 187)

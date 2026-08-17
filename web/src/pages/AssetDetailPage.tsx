@@ -121,6 +121,11 @@ export function AssetDetailPage() {
         </button>
       </div>
       {actionError && <p className="text-sm text-signal-err">{actionError}</p>}
+      {error && (
+        <p className="text-sm text-signal-warn">
+          Refresh failed ({error}) — showing last known values.
+        </p>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="panel overflow-hidden lg:col-span-2">

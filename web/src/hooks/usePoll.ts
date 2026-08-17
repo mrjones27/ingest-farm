@@ -34,11 +34,35 @@ export function usePoll<T>(
         }
       }
     };
+    let timer: number | undefined;
+    const start = () => {
+      if (timer === undefined) {
+        timer = window.setInterval(() => void run(), intervalMs);
+      }
+    };
+    const stop = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+    // A background tab does not need runtime updates; resume with a fresh read.
+    const onVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        void run();
+        start();
+      }
+    };
+
     void run();
-    const timer = window.setInterval(() => void run(), intervalMs);
+    if (!document.hidden) start();
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [intervalMs, tick, resetKey]);
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import redis
@@ -29,8 +30,7 @@ def set_channel_stats(channel_id: str, stats: dict[str, Any], *, ttl_sec: int = 
     client.set(channel_stats_key(channel_id), json.dumps(stats), ex=ttl_sec)
 
 
-def get_channel_stats(channel_id: str) -> dict[str, Any] | None:
-    raw = get_redis(socket_timeout=5).get(channel_stats_key(channel_id))
+def _decode_stats(raw: str | None) -> dict[str, Any] | None:
     if not raw:
         return None
     try:
@@ -38,6 +38,23 @@ def get_channel_stats(channel_id: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def get_channel_stats(channel_id: str) -> dict[str, Any] | None:
+    return _decode_stats(get_redis(socket_timeout=5).get(channel_stats_key(channel_id)))
+
+
+def get_channel_stats_many(channel_ids: Sequence[str]) -> dict[str, dict[str, Any] | None]:
+    """Read many channels' stats in one round trip.
+
+    Listing channels one GET at a time multiplies any Redis latency by the
+    number of channels.
+    """
+    ids = list(channel_ids)
+    if not ids:
+        return {}
+    raws = get_redis(socket_timeout=5).mget([channel_stats_key(cid) for cid in ids])
+    return {cid: _decode_stats(raw) for cid, raw in zip(ids, raws, strict=True)}
 
 
 def clear_channel_stats(channel_id: str) -> None:
