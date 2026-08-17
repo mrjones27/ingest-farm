@@ -9,62 +9,110 @@ This project is a broadcast media ingest platform.
 
 The system consists of:
 
-- A FastAPI control/API service
+- FastAPI control/API services
 - GStreamer-based ingest workers
 - PostgreSQL for persistent configuration and state
-- A React + TypeScript + Vite frontend
+- React + TypeScript + Vite frontend
 - Docker/Compose for development and deployment
 - Broadcast media protocols including RTP, UDP, SRT and MPEG-TS
 
 ## Architecture
 
-Separate the system into:
+Keep the following concerns separate:
 
 1. Control plane
 2. Ingest/runtime plane
 3. Persistence
-4. Monitoring/observability
+4. Monitoring and observability
 5. Frontend
 
-Do not place GStreamer implementation details directly inside FastAPI route handlers.
+API routes must not contain GStreamer pipeline implementation.
 
 API routes should call application services.
 
-Application services should interact with GStreamer through a defined runtime abstraction.
+Application services should interact with the ingest runtime through a defined
+runtime abstraction.
 
-## Engineering Principles
+The runtime layer owns GStreamer pipeline lifecycle.
 
-- Prefer simple solutions.
-- Do not introduce abstractions without a demonstrated need.
-- Do not create distributed-system components unless the architecture requires them.
-- Do not replace existing technologies without explicit justification.
-- Preserve existing behaviour unless the requested change requires otherwise.
-- Make changes as small and local as reasonably possible.
+## Desired State vs Runtime State
+
+Persistent configuration represents desired state.
+
+GStreamer represents runtime state.
+
+Do not assume that database state reflects current pipeline state.
+
+Runtime state must be observable independently of persistent configuration.
+
+Reconciliation between desired state and runtime state must be explicit.
+
+For example:
+
+    Database
+       |
+       | desired state
+       v
+    Control Plane
+       |
+       v
+    Worker / Runtime Manager
+       |
+       v
+    GStreamer
+       |
+       | actual state
+       v
+    Monitoring
+
+## Long-Running Operations
+
+Do not perform long-running media operations directly inside HTTP request
+handlers.
+
+API requests may request state changes, but the runtime manager owns the
+actual pipeline lifecycle.
+
+Do not block the API process waiting for media processing to complete.
 
 ## Broadcast Engineering
 
-Treat media timing, packet loss, jitter, buffering and synchronisation as first-class concerns.
+Treat media timing, packet loss, jitter, buffering and synchronisation as
+first-class concerns.
 
 Do not treat broadcast media as ordinary web traffic.
 
 When diagnosing ingest failures, consider the complete chain:
 
 NIC
+-> interface/VLAN
 -> routing
--> multicast/IGMP
--> UDP socket
--> GStreamer source
--> depayloader/parser
--> decoder
+-> multicast/IGMP where applicable
+-> UDP/SRT socket
+-> RTP where applicable
+-> MPEG-TS where applicable
+-> GStreamer
 -> downstream processing
 
 Do not assume that a pipeline failure is necessarily a GStreamer problem.
+
+## Engineering Principles
+
+- Prefer simple solutions.
+- Make the smallest change that correctly solves the problem.
+- Do not introduce abstractions without a demonstrated need.
+- Do not introduce distributed-system components without an architectural
+  requirement.
+- Preserve existing behaviour unless the requested change requires otherwise.
+- Do not silently change protocols, media formats or public APIs.
+- Prefer explicit behaviour over implicit magic.
 
 ## Validation
 
 Before claiming that a change works:
 
-- Run the relevant tests.
+- Run relevant tests.
 - Validate configuration.
-- Validate GStreamer elements and properties against the installed version where applicable.
-- Do not claim a command or API works without evidence.
+- Validate external dependencies where applicable.
+- Verify GStreamer elements and properties against the installed version.
+- Do not claim that an untested media pipeline works.

@@ -1,12 +1,79 @@
 ---
-description: "Prevent AI over-engineering by keeping changes scoped, simple, and directly tied to the user's request"
-globs: ["**/*"]
+description: Keep implementation changes simple, focused and proportional to the request
 alwaysApply: true
 ---
+
 # Anti-Over-Engineering
 
-Only change what was asked. Simplest solution first. When unsure, ask.
+## Scope
 
-Do not modify unrequested code, add abstractions without a concrete need, import unnecessary dependencies, rewrite entire files for small changes, or add error handling for impossible scenarios.
+Only change what is required to satisfy the request.
 
-Before delivery: verify you only changed requested code, check for simpler approaches, confirm no unrequested files were touched.
+Do not refactor unrelated code while implementing a feature or fixing a bug.
+
+Do not introduce abstractions merely because they might be useful later.
+
+Prefer the simplest implementation that:
+
+- satisfies the requirement
+- is maintainable
+- is testable
+- fits the existing architecture
+
+## Avoid Unnecessary Complexity
+
+Do not introduce:
+
+- new frameworks
+- new services
+- message brokers
+- event buses
+- distributed locks
+- background workers
+- repositories
+- factories
+- strategies
+- abstractions
+- configuration layers
+
+unless there is a concrete requirement for them.
+
+Existing abstractions should be reused where appropriate.
+
+## Broadcast Systems
+
+Do not assume that a broadcast system requires distributed-system complexity.
+
+For example, do not introduce a message broker simply because ingest workers
+communicate with a control plane.
+
+First determine whether an existing HTTP/API, database or in-process mechanism
+is sufficient.
+
+## Refactoring
+
+Do not perform opportunistic refactoring.
+
+If a refactor is necessary to implement the requested change:
+
+1. Keep it as small as possible.
+2. Explain why it is necessary.
+3. Preserve existing behaviour.
+4. Add or update tests where appropriate.
+
+## Dependencies
+
+Do not add a dependency when the standard library or an existing project
+dependency provides a reasonable solution.
+
+Every new dependency should have a clear reason to exist.
+
+## Implementation
+
+Prefer:
+
+    simple + explicit + testable
+
+over:
+
+    abstract + generic + configurable + extensible

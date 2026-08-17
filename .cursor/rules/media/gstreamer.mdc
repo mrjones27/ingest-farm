@@ -1,48 +1,48 @@
 ---
 description: GStreamer development rules for broadcast ingest pipelines
-globs: **/*.py, **/*.gst, **/*.sh
+globs:
+  - "backend/**/*.py"
+  - "tests/media/**/*.py"
+  - "**/*.gst"
+  - "**/*.sh"
 alwaysApply: false
 ---
 
-# GStreamer Development
+# GStreamer
 
-GStreamer is the media processing runtime for this application.
+GStreamer is the media processing runtime for the ingest system.
 
-## Runtime
+## Application vs gst-launch
 
-Application code must control GStreamer through the GStreamer API.
+The application must control GStreamer through the GStreamer API.
 
-Do not use gst-launch-1.0 as the application's runtime engine.
+Do not use `gst-launch-1.0` as the application's runtime engine.
 
-gst-launch-1.0 may be used for:
+`gst-launch-1.0` may be used for:
 
-- diagnostics
 - development
-- reproducing pipeline problems
+- diagnostics
+- reproducing problems
 - validating element behaviour
 
 ## Pipeline Construction
 
-Prefer programmatic pipeline construction.
+Prefer explicit programmatic pipeline construction.
 
-Pipelines must be:
+Important elements should have explicit references or names so they can be
+inspected and controlled later.
 
-- explicit
-- inspectable
-- observable
-- recoverable
-
-Avoid opaque dynamically generated pipeline strings where programmatic
-element construction provides better control.
+Avoid opaque dynamically generated pipeline strings when programmatic
+construction provides better lifecycle and error handling.
 
 ## Pipeline Lifecycle
 
-Explicitly handle:
+The runtime must explicitly manage:
 
-- NULL
-- READY
-- PAUSED
-- PLAYING
+    NULL
+    READY
+    PAUSED
+    PLAYING
 
 Handle:
 
@@ -51,48 +51,94 @@ Handle:
 - EOS
 - STATE_CHANGED
 
-Pipeline lifecycle must not be hidden inside API route handlers.
+Do not assume that PLAYING means valid media is flowing.
 
-## Failure Handling
+## GstBus
 
-A pipeline failure must provide enough information to determine:
+Runtime errors and warnings must be observed through the GStreamer bus.
 
-- which pipeline failed
-- which element generated the error
-- GStreamer error message
+Do not rely solely on state changes to detect pipeline failure.
+
+Capture useful information including:
+
+- source element
+- error message
 - debug information
 - pipeline state
-- timestamp of failure
 
-Do not automatically restart pipelines indefinitely.
+## Pipeline Ownership
 
-Restart policies must have:
+Pipeline ownership must be explicit.
 
-- bounded retries
+The component that creates a pipeline must have a defined responsibility for:
+
+- lifecycle
+- shutdown
+- cleanup
+- error handling
+- restart behaviour
+
+Do not allow multiple unrelated components to control the same pipeline.
+
+## Restart Behaviour
+
+Do not restart failed pipelines indefinitely.
+
+Restart logic must have:
+
+- bounded or controlled retry behaviour
 - backoff
 - observable retry state
-- a clear failure state
+- clear failure state
 
 ## API Verification
 
-Never invent GStreamer elements or properties.
+Never invent GStreamer:
 
-When implementing functionality involving GStreamer:
+- elements
+- properties
+- signals
+- methods
+- plugins
+- pad capabilities
 
-1. Verify the element exists.
-2. Verify the property exists.
-3. Verify the property type.
-4. Verify the installed plugin/version where relevant.
+Verify them against the installed GStreamer version.
 
-Use gst-inspect-1.0 when available.
+Use:
+
+    gst-inspect-1.0 <element>
+
+where appropriate.
 
 ## Performance
 
-Do not introduce unnecessary copies of media buffers.
+Avoid unnecessary media-buffer copies.
 
-Do not convert media formats unless required.
+Avoid unnecessary format conversion.
 
-Avoid decoding media when the operation can be performed on the
-compressed stream.
+Do not decode compressed media unless decoding is required.
 
-Treat latency and buffering as explicit design parameters.
+Treat latency, buffering and queue sizes as explicit design decisions.
+
+Do not change buffering values merely to hide an underlying network or timing
+problem.
+
+## Media Semantics
+
+Do not confuse:
+
+- RTP timestamps
+- MPEG-TS PCR
+- PTS
+- DTS
+- NTP
+- system clock
+
+They represent different timing concepts.
+
+## Diagnostics
+
+Prefer a minimal reproducible GStreamer pipeline when diagnosing an issue.
+
+First establish whether the source works independently of the application,
+then determine whether the application runtime behaves correctly.

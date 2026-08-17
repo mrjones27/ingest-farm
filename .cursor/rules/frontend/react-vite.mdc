@@ -1,69 +1,106 @@
 ---
-description: "Cursor rules for TypeScript development with Node.js, React, and Vite integration."
-globs: **/*
+description: React, TypeScript and Vite frontend development rules
+globs:
+  - "frontend/**/*.ts"
+  - "frontend/**/*.tsx"
 alwaysApply: false
 ---
-You are an expert in TypeScript, Node.js, React, Vite, TanStack Query, TanStack Router, and Tailwind.
 
-Response Constraints
-- Do not remove any existing code unless necessary.
-- Do not remove my comments or commented-out code unless necessary.
-- Do not change the formatting of my imports.
-- Do not change the formatting of my code unless important for new functionality.
+# React + TypeScript + Vite
 
-Code Style and Structure
-- Write concise, technical TypeScript code with accurate examples.
-- Use functional and declarative programming patterns; avoid classes.
-- Prefer iteration and modularization over code duplication.
-- Use descriptive variable names with auxiliary verbs (e.g., isLoading, hasError).
-- Structure files: exported component, subcomponents, helpers, static content, types.
+The frontend is the control and monitoring interface for the ingest farm.
 
-Naming Conventions
-- Use lowercase with dashes for directories (e.g., components/auth-wizard).
-- Favor named exports for components.
+## Architecture
 
-TypeScript Usage
-- Use TypeScript for all code; prefer interfaces over types.
-- Avoid enums; use maps instead.
-- Use functional components with TypeScript interfaces.
+Prefer feature-oriented organisation.
 
-Syntax and Formatting
-- Use the "function" keyword for pure functions.
-- Use curly braces for all conditionals. Favor simplicity over cleverness.
-- Use declarative JSX.
+Example:
 
-UI and Styling
-- Use Tailwind for components and styling.
+    frontend/
+    ├── components/
+    ├── features/
+    │   ├── ingest/
+    │   ├── workers/
+    │   ├── monitoring/
+    │   └── recordings/
+    ├── hooks/
+    ├── api/
+    ├── types/
+    └── pages/
 
-Performance Optimization
-- Look for ways to make things faster:
-  - Use immutable data structures
-  - Use efficient data fetching strategies
-  - Optimize network requests
-  - Use efficient data structures
-  - Use efficient algorithms
-  - Use efficient rendering strategies
-  - Use efficient state management
+Do not create a large monolithic App component.
 
-project-specific structure
+## Components
 
-frontend/
-├── components/
-├── features/
-│   ├── ingest/
-│   ├── channels/
-│   ├── workers/
-│   ├── monitoring/
-│   └── recordings/
-├── hooks/
-├── api/
-├── types/
-└── pages/
+Components should primarily handle:
 
-Prefer feature-oriented organisation over a large global collection
-of unrelated components.
+- presentation
+- user interaction
+- composition
 
-Keep API communication outside presentational components.
+Move complex business logic into hooks, services or appropriate feature
+modules.
 
-Do not put business logic into React components when it belongs
-in the backend.
+## API
+
+Do not perform raw API requests throughout arbitrary components.
+
+Centralise API interaction in the appropriate API/query layer.
+
+## State
+
+Distinguish between:
+
+- server state
+- UI state
+- derived state
+
+Prefer TanStack Query for server state.
+
+Do not introduce global state management without a concrete requirement.
+
+## TypeScript
+
+Prefer explicit types for API contracts and important domain objects.
+
+Avoid `any`.
+
+Do not duplicate backend API models unnecessarily if generated or shared
+contracts are available.
+
+## Error Handling
+
+User-facing errors should be meaningful.
+
+Do not expose raw backend stack traces.
+
+Media/runtime errors should present useful operational information where
+appropriate, such as:
+
+- ingest name
+- worker
+- state
+- failure reason
+- timestamp
+
+## UI and Broadcast State
+
+Do not represent a pipeline as simply "online/offline" when the backend
+provides more meaningful runtime states.
+
+Prefer explicit states such as:
+
+- starting
+- running
+- stopping
+- stopped
+- error
+- recovering
+- unknown
+
+## Vite
+
+Use Vite's existing project configuration.
+
+Do not introduce alternative bundlers or build systems without an explicit
+requirement.

@@ -1,23 +1,127 @@
 ---
-description: "Cursor rules for Python development with containerization integration."
-globs: **/*
+description: Broadcast network troubleshooting and networking rules
+globs:
+  - "backend/**/*.py"
+  - "tests/**/*.py"
+  - "**/*.sh"
+  - "**/*.md"
 alwaysApply: false
 ---
-You are an expert in Python, database algorithms, and containerization technologies.
 
-Follow Python's official documentation and PEPs for best practices in Python development.
+# Broadcast Networking
 
-GStreamer containers must explicitly declare required runtime plugins.
+The ingest farm handles broadcast network traffic.
 
-Do not assume the host's GStreamer installation is available inside
-the container.
+Diagnose network problems from the bottom up.
 
-Container images must be reproducible.
+## Troubleshooting Order
 
-Development and production images should be clearly separated where
-their requirements differ.
+When an ingest source cannot be received, consider:
 
-Configuration must be supplied through environment/configuration,
-not baked into images.
+    NIC/link
+      |
+    interface/VLAN
+      |
+    IP addressing
+      |
+    routing
+      |
+    multicast membership
+      |
+    multicast forwarding
+      |
+    UDP socket
+      |
+    RTP
+      |
+    MPEG-TS
+      |
+    GStreamer
 
-Media data must not be stored in the container writable layer.
+Do not immediately modify the GStreamer pipeline when the problem may be
+below the application layer.
+
+## Multicast
+
+For multicast ingest consider:
+
+- multicast group
+- source address
+- destination port
+- receiving interface
+- routing table
+- IGMP version
+- IGMP membership
+- SSM vs ASM
+- upstream multicast forwarding
+- Docker networking
+- socket binding
+
+Do not assume that joining a multicast group guarantees packets will arrive.
+
+## IGMP
+
+When using multicast, distinguish:
+
+- IGMP membership
+- multicast routing
+- multicast forwarding
+- application socket membership
+
+A successful IGMP join does not prove that media packets are arriving.
+
+## UDP
+
+Consider:
+
+- receive buffer size
+- socket binding
+- port conflicts
+- packet rate
+- packet loss
+- interface selection
+- MTU where relevant
+
+Do not increase socket buffers blindly. Explain why the change is required.
+
+## RTP
+
+When RTP is involved, distinguish:
+
+- UDP packet loss
+- RTP sequence-number loss
+- RTP reordering
+- RTP jitter
+- timestamp discontinuities
+
+Do not describe all of these as "packet loss".
+
+## Diagnostics
+
+Prefer evidence-producing diagnostics such as:
+
+    ip addr
+    ip route
+    ip maddr
+    ss
+    tcpdump
+    ethtool
+    gst-inspect-1.0
+
+Use packet captures when they can establish whether the problem exists before
+the application.
+
+## Docker
+
+When diagnosing multicast inside containers, distinguish host networking
+behaviour from container networking behaviour.
+
+Do not assume that a pipeline working directly on the host will work
+unchanged inside a container.
+
+## Safety
+
+Do not make destructive network changes without understanding their scope.
+
+Do not flush routing tables, firewall rules or network configuration merely
+as a diagnostic shortcut.

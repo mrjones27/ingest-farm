@@ -1,23 +1,85 @@
 ---
-description: "Cursor rules for Python development with containerization integration."
-globs: **/*
+description: Docker and containerisation rules for the ingest farm
+globs:
+  - "**/Dockerfile"
+  - "**/Dockerfile.*"
+  - "**/compose*.yml"
+  - "**/compose*.yaml"
 alwaysApply: false
 ---
-You are an expert in Python, database algorithms, and containerization technologies.
 
-Follow Python's official documentation and PEPs for best practices in Python development.
+# Docker
 
-GStreamer containers must explicitly declare required runtime plugins.
-
-Do not assume the host's GStreamer installation is available inside
-the container.
+## Images
 
 Container images must be reproducible.
 
-Development and production images should be clearly separated where
-their requirements differ.
+Pin important base images and dependencies appropriately for the project.
 
-Configuration must be supplied through environment/configuration,
-not baked into images.
+Do not rely on packages being installed on the host.
 
-Media data must not be stored in the container writable layer.
+## GStreamer
+
+The container must explicitly contain the GStreamer runtime and plugins it
+requires.
+
+Do not assume the host's GStreamer installation is available inside a
+container.
+
+When adding a GStreamer element, verify that the required plugin is included
+in the image.
+
+## Runtime
+
+Containers should run only the services they are responsible for.
+
+Do not combine unrelated services into a single container merely for
+convenience.
+
+## Configuration
+
+Configuration should be supplied through environment variables or mounted
+configuration.
+
+Do not bake:
+
+- credentials
+- secrets
+- environment-specific addresses
+- multicast groups
+- API keys
+
+into images.
+
+## Media Data
+
+Do not store persistent media data in the container writable layer.
+
+Use appropriate volumes or external storage.
+
+## Logging
+
+Applications should log to stdout/stderr so container runtimes can collect
+logs.
+
+Do not require SSH access to a container for normal diagnostics.
+
+## Health
+
+Containers should expose useful health information where appropriate.
+
+A process being alive does not necessarily mean the ingest service is healthy.
+
+## Networking
+
+Do not modify Docker networking simply to make a media pipeline work without
+understanding the network requirement.
+
+Multicast, UDP and SRT networking requirements must be explicit.
+
+## Compose
+
+Docker Compose is primarily a development and local integration environment
+unless the deployment architecture explicitly states otherwise.
+
+Do not assume Compose provides production-grade orchestration semantics.

@@ -1,95 +1,126 @@
 ---
-description: Broadcast engineering domain rules for RTP, MPEG-TS, SRT and live ingest
-globs: **/*.py, **/*.ts, **/*.tsx, **/*.md
+description: Broadcast media domain knowledge for RTP, MPEG-TS, SRT and multicast
+globs:
+  - "backend/**/*.py"
+  - "tests/media/**/*.py"
+  - "frontend/**/*.ts"
+  - "frontend/**/*.tsx"
+  - "**/*.md"
 alwaysApply: false
 ---
 
-# Broadcast Domain
+# Broadcast Media Domain
+
+This is a broadcast ingest platform.
+
+Media protocols must be treated according to their actual semantics rather
+than generic web/video assumptions.
 
 ## MPEG Transport Stream
 
-Understand and preserve the distinction between:
+Distinguish between:
 
 - TS packets
-- PIDs
+- PID
 - PAT
 - PMT
+- PES
+- elementary streams
 - PCR
 - PTS
 - DTS
-- PES
-- elementary streams
 
-Do not refer to these concepts interchangeably.
+Do not use these terms interchangeably.
+
+## MPEG-TS over UDP
+
+MPEG-TS carried over UDP is not necessarily RTP.
+
+Determine whether the transport is:
+
+- raw MPEG-TS over UDP
+- MPEG-TS over RTP
+- MPEG-TS over SRT
+- another encapsulation
+
+before selecting an appropriate pipeline or diagnostic approach.
 
 ## RTP
 
-RTP sequence numbers and timestamps are not wall-clock timestamps.
+RTP sequence numbers, timestamps and SSRC identify RTP behaviour.
 
-RTP packet loss, reordering and jitter must be considered separately.
+Do not interpret an RTP timestamp as a wall-clock timestamp.
 
-## MPEG-TS over RTP
+Distinguish:
 
-When handling MPEG-TS over RTP, distinguish:
-
-network packet loss
-from
-RTP packet loss
-from
-MPEG-TS continuity errors
-from
-decoder errors.
+- packet loss
+- packet reordering
+- jitter
+- duplicate packets
+- sequence-number gaps
+- timestamp discontinuity
 
 ## SRT
 
-Treat SRT as a transport layer.
+SRT is a transport protocol.
 
-Do not assume that successful SRT connectivity means the MPEG-TS payload is valid.
+Successful SRT connectivity does not prove that the payload contains valid
+MPEG-TS or valid media.
+
+Validate the payload separately.
 
 ## Multicast
 
-For multicast ingest consider:
+For multicast consider:
 
-- interface selection
-- routing
-- IGMP membership
-- IGMP version
-- SSM versus ASM
+- group address
 - source address
-- multicast group
-- UDP port
-- socket binding
-- Docker networking
+- destination port
+- interface
+- IGMP
+- routing
+- forwarding
+- SSM/ASM
 
-Do not diagnose multicast problems solely from the GStreamer pipeline.
+Do not assume that receiving multicast traffic means that the application has
+correctly identified the intended source.
 
 ## Timing
 
-Do not confuse:
+Treat these as distinct:
 
+- RTP timestamp
+- PCR
 - PTS
 - DTS
-- PCR
-- RTP timestamp
 - NTP
 - system clock
 
-Media timestamps must be interpreted according to the relevant protocol and
-clock domain.
+Do not compare values from different clock domains without establishing the
+required conversion.
 
 ## 2022-7
 
-When implementing ST 2022-7 style redundant flows, treat the two paths as
-separate network paths carrying correlated media.
-
-Do not assume that two UDP inputs automatically provide hitless protection.
-
-The implementation must define:
+When implementing redundant media paths, explicitly define:
 
 - path identity
 - packet correlation
 - sequence handling
-- loss detection
 - duplicate suppression
-- failover behaviour
+- loss detection
+- path failure detection
 - recovery behaviour
+
+Do not assume that two inputs automatically provide hitless protection.
+
+## Broadcast vs Application State
+
+A running application process does not imply valid media.
+
+A GStreamer pipeline in PLAYING state does not imply valid media.
+
+A connected SRT session does not imply valid MPEG-TS.
+
+A multicast socket receiving packets does not imply valid media.
+
+Validate each layer independently.
