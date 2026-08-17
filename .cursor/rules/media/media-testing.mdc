@@ -1,3 +1,298 @@
 ---
-alwaysApply: true
+description: Testing rules for broadcast media pipelines, ingest and transport
+globs: "**/tests/**/*.py", "**/*test*.py", "**/*spec*.py"
+alwaysApply: false
 ---
+
+# Media Testing
+
+This project is a broadcast media ingest system. Tests must consider both
+software behaviour and media correctness.
+
+## General Principles
+
+- Prefer deterministic, repeatable tests.
+- Tests must not depend on external broadcast sources unless explicitly
+  testing an integration with an external source.
+- Prefer generated test media and controlled test signals.
+- A test should clearly distinguish between application failure and media
+  pipeline failure.
+- Do not mark a media test as passing solely because a GStreamer pipeline
+  reaches PLAYING state.
+- Avoid tests that require real-time playback unless real-time behaviour is
+  the subject being tested.
+
+## Test Categories
+
+Tests should generally fall into one of these categories:
+
+1. Unit tests
+2. Pipeline construction tests
+3. Pipeline lifecycle tests
+4. Media validation tests
+5. Transport tests
+6. Fault-injection tests
+7. Integration tests
+8. End-to-end tests
+
+Keep these categories separate where practical.
+
+## Unit Tests
+
+Unit tests should not require GStreamer to be running unless the behaviour
+being tested specifically belongs to GStreamer.
+
+Test independently:
+
+- configuration parsing
+- pipeline configuration
+- validation
+- state management
+- retry logic
+- health calculations
+- error handling
+- API behaviour
+- persistence logic
+
+Prefer dependency injection so GStreamer can be mocked for pure application
+logic.
+
+## Pipeline Construction Tests
+
+Pipeline construction tests should verify that the expected GStreamer
+elements and properties are present.
+
+Where practical, verify:
+
+- element names
+- element types
+- properties
+- caps
+- pad linking
+- expected pipeline topology
+
+Do not assume that a pipeline string is valid simply because it can be
+constructed as a string.
+
+If GStreamer is required for the test, fail clearly when the required
+plugins are unavailable.
+
+## Pipeline Lifecycle Tests
+
+Test the expected state transitions:
+
+NULL -> READY -> PAUSED -> PLAYING
+
+and failure transitions such as:
+
+PLAYING -> ERROR
+PLAYING -> EOS
+PLAYING -> NULL
+
+Verify that the application correctly handles:
+
+- ERROR messages
+- WARNING messages
+- EOS
+- unexpected state changes
+- pipeline shutdown
+- pipeline restart
+
+A successful transition to PLAYING is not sufficient evidence that media is
+actually flowing.
+
+## Media Flow Tests
+
+Where possible, tests should verify actual media flow through the pipeline.
+
+Examples include:
+
+- buffers are received
+- expected stream types are detected
+- expected caps are negotiated
+- RTP packets are processed
+- MPEG-TS packets are received
+- expected PIDs are present
+- timestamps are progressing
+- audio/video streams remain present
+
+Use short, deterministic test media rather than long recordings.
+
+## MPEG-TS Testing
+
+When testing MPEG-TS ingest, distinguish between:
+
+- transport packet reception
+- TS continuity
+- PAT/PMT availability
+- PES availability
+- elementary stream validity
+- PCR presence
+- PTS/DTS behaviour
+- decoder behaviour
+
+A test should identify which layer failed.
+
+Do not describe a failure simply as "MPEG-TS is broken".
+
+## RTP Testing
+
+RTP tests should consider:
+
+- sequence numbers
+- timestamps
+- packet loss
+- packet reordering
+- duplicate packets
+- jitter
+- SSRC changes where relevant
+
+Do not confuse RTP packet loss with MPEG-TS continuity errors.
+
+## Fault Injection
+
+Media systems must be tested under degraded conditions.
+
+Where practical, test:
+
+- source disappearance
+- UDP packet loss
+- RTP packet loss
+- packet reordering
+- jitter
+- delayed packets
+- malformed packets
+- unexpected EOS
+- GStreamer ERROR
+- network interruption
+- source reconnection
+- pipeline restart
+
+Fault injection should be deterministic where possible.
+
+For example, prefer a controlled 1% packet-loss test over an uncontrolled
+real-world network test.
+
+## Test Media
+
+Use a small collection of known-good test assets.
+
+Test assets should have documented characteristics including, where relevant:
+
+- container
+- codec
+- resolution
+- frame rate
+- interlacing
+- audio format
+- sample rate
+- channel count
+- bitrate
+- GOP structure
+- MPEG-TS PID layout
+- PCR behaviour
+
+Do not silently replace a test asset with a different media format.
+
+If a test depends on a particular media characteristic, document it in the
+test.
+
+## Timing
+
+Avoid unnecessary real-time sleeps.
+
+Prefer deterministic mechanisms such as:
+
+- explicit state changes
+- bus messages
+- buffer counters
+- timestamps
+- test clocks
+- bounded polling
+
+If a real-time wait is unavoidable, use a bounded timeout and make the
+reason explicit.
+
+Tests must never wait indefinitely for media.
+
+## Timeouts
+
+All integration and media-flow tests must have explicit timeouts.
+
+A failed media source must result in a test failure, not a hanging test
+suite.
+
+Timeouts should be long enough for CI environments but short enough to
+identify failures quickly.
+
+## External Tools
+
+Where appropriate, use established media tools to validate test output.
+
+Examples include:
+
+- GStreamer
+- gst-launch-1.0
+- gst-inspect-1.0
+- FFmpeg
+- TSDuck
+
+Do not assume that a tool is installed. Tests that require an external tool
+must either verify its availability or clearly belong to an environment
+where that dependency is guaranteed.
+
+## Test Output
+
+When a media test fails, provide useful diagnostic information.
+
+Where relevant include:
+
+- pipeline configuration
+- GStreamer error
+- GStreamer debug information
+- pipeline state
+- stream information
+- packet/continuity statistics
+- test asset
+- timeout
+- relevant timestamps
+
+The objective is that a failed CI test should provide enough information
+to begin diagnosing the media problem without reproducing it immediately.
+
+## CI
+
+Tests should be divided according to their environmental requirements.
+
+For example:
+
+tests/unit/
+    No GStreamer or external network required.
+
+tests/gstreamer/
+    Requires GStreamer.
+
+tests/media/
+    Requires known-good test media.
+
+tests/integration/
+    May require supporting services.
+
+tests/e2e/
+    Full application environment.
+
+Do not make the entire test suite depend on GStreamer or network access
+when most tests can run independently.
+
+## Test Philosophy
+
+A media pipeline can be:
+
+- syntactically valid
+- successfully constructed
+- in PLAYING state
+
+and still not be producing valid media.
+
+Tests should therefore validate behaviour at the lowest useful level rather
+than relying solely on application state.
