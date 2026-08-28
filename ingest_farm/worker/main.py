@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from ingest_farm.common.events import (
     CHANNEL_CONNECT_QUEUE,
     CHANNEL_DISCONNECT_QUEUE,
+    CHANNEL_ETR290_RESET_QUEUE,
     CHANNEL_RECORD_START_QUEUE,
     CHANNEL_RECORD_STOP_QUEUE,
     POSTPROCESS_QUEUE,
@@ -133,14 +134,32 @@ class IngestWorker:
                     logger.warning("Discarding %s job without channel_id: %r", op, job)
                 job = try_pop(queue)
 
+        reset_ids: list[str] = []
+        job = try_pop(CHANNEL_ETR290_RESET_QUEUE)
+        while job:
+            channel_id = job.get("channel_id")
+            if channel_id:
+                reset_ids.append(channel_id)
+            else:
+                logger.warning("Discarding etr290_reset job without channel_id: %r", job)
+            job = try_pop(CHANNEL_ETR290_RESET_QUEUE)
+
         handlers = {
             "disconnect": self._handle_disconnect,
             "stop": self._handle_record_stop,
             "start": self._handle_record_start,
         }
+        disconnected: set[str] = set()
         for channel_id, ops in pending.items():
             for op in self._resolve_ops(channel_id, ops):
                 handlers[op]({"channel_id": channel_id})
+                if op == "disconnect":
+                    disconnected.add(channel_id)
+
+        for channel_id in reset_ids:
+            if channel_id in disconnected:
+                continue
+            self._handle_etr290_reset({"channel_id": channel_id})
 
     def _resolve_ops(self, channel_id: str, ops: list[str]) -> list[str]:
         """Collapse one tick's ops for a channel into what should actually run."""
@@ -317,6 +336,17 @@ class IngestWorker:
                 if ch:
                     ch.status = "error"
                     db.commit()
+
+    def _handle_etr290_reset(self, job: dict) -> None:
+        channel_id = job["channel_id"]
+        session = self._sessions.get(channel_id)
+        if session is None:
+            logger.info("ETR 290 reset ignored; no session for %s", channel_id)
+            return
+        try:
+            session.reset_etr290()
+        except Exception:
+            logger.exception("ETR 290 reset failed for channel %s", channel_id)
 
     def _handle_disconnect(self, job: dict) -> None:
         channel_id = job["channel_id"]

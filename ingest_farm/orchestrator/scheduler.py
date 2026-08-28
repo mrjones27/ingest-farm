@@ -7,6 +7,7 @@ from redis import RedisError
 from ingest_farm.common.events import (
     CHANNEL_CONNECT_QUEUE,
     CHANNEL_DISCONNECT_QUEUE,
+    CHANNEL_ETR290_RESET_QUEUE,
     CHANNEL_RECORD_START_QUEUE,
     CHANNEL_RECORD_STOP_QUEUE,
     publish_event,
@@ -139,6 +140,30 @@ class Scheduler:
             "stopping",
         )
         logger.info("Queued record stop for channel %s", channel_id)
+
+    def reset_etr290(self, db: Session, channel_id: str) -> None:
+        channel = db.get(Channel, channel_id)
+        if channel is None:
+            raise ValueError(f"Channel {channel_id} not found")
+        if channel.protocol != "srt":
+            raise ValueError("ETR 290 reset is only available for SRT channels")
+        if channel.status not in {
+            "connecting",
+            "connected",
+            "recording",
+            "starting",
+            "stopping",
+        }:
+            raise ValueError(f"Channel {channel_id} is not live (status={channel.status})")
+
+        self._commit_then_publish(
+            db,
+            channel,
+            CHANNEL_ETR290_RESET_QUEUE,
+            {"channel_id": channel_id},
+            None,
+        )
+        logger.info("Queued ETR 290 reset for channel %s", channel_id)
 
     # Back-compat names used by older API routes.
     def start_channel(self, db: Session, channel_id: str) -> None:

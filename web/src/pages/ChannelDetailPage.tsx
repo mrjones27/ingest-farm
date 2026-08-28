@@ -15,7 +15,7 @@ import {
 import { ChannelFormModal } from "../components/ChannelFormModal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Etr290Panel } from "../components/Etr290Panel";
-import { LiveThumb } from "../components/LiveThumb";
+import { CompactLiveThumb } from "../components/LiveThumb";
 import { SrtStatsPanel } from "../components/SrtStatsPanel";
 import { StatusBadge } from "../components/StatusBadge";
 import { usePoll } from "../hooks/usePoll";
@@ -178,13 +178,14 @@ export function ChannelDetailPage() {
         </p>
       )}
 
-      <section className="panel overflow-hidden">
-        <LiveThumb
-          url={channel.urls?.thumbnail}
-          alt={`${channel.name} live preview`}
-          className="aspect-video w-full max-h-80"
-        />
-      </section>
+      {channel.source.protocol !== "srt" && live && (
+        <section className="w-fit">
+          <CompactLiveThumb
+            url={channel.urls?.thumbnail}
+            alt={`${channel.name} live preview`}
+          />
+        </section>
+      )}
 
       {channel.source.protocol === "srt" && live && (
         <section className="panel p-4">
@@ -203,6 +204,9 @@ export function ChannelDetailPage() {
           <Etr290Panel
             receiving={Boolean(channel.stats?.receiving)}
             stats={channel.stats}
+            thumbnailUrl={channel.urls?.thumbnail}
+            channelId={channel.id}
+            thumbAlt={`${channel.name} live preview`}
           />
         </section>
       )}

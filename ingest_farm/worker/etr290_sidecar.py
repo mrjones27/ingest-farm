@@ -1,7 +1,6 @@
 """Sidecar: tsp influx --tr-101-290 → local Influx write stub → etr290.json."""
 from __future__ import annotations
 
-import json
 import shutil
 import socket
 import subprocess
@@ -12,7 +11,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ingest_farm.worker.etr290 import parse_influx_body, rollup_etr290_snapshot, tsp_command
+from ingest_farm.worker.etr290 import (
+    accumulate_etr290_snapshot,
+    empty_etr290_session,
+    load_pid_structure,
+    parse_influx_body,
+    rollup_etr290_snapshot,
+    tsp_command,
+    write_json_atomic,
+)
 
 _MAX_WRITE_BYTES = 1_048_576
 _STDERR_KEEP = 50
@@ -50,19 +57,13 @@ class _InfluxStubHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8", errors="replace")
         parsed = parse_influx_body(body)
         if parsed["counters"] or parsed["packet_count"] is not None:
-            snap = rollup_etr290_snapshot(parsed, interval_sec=self.interval_sec)
+            interval_snap = rollup_etr290_snapshot(parsed, interval_sec=self.interval_sec)
             with self.snapshot_lock:
+                accumulated = accumulate_etr290_snapshot(dict(self.snapshot), interval_snap)
                 self.snapshot.clear()
-                self.snapshot.update(snap)
+                self.snapshot.update(accumulated)
         self.send_response(204)
         self.end_headers()
-
-
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    try:
-        path.write_text(json.dumps(data), encoding="utf-8")
-    except OSError:
-        pass
 
 
 def _drain_stderr(stream: Any, buf: list[str]) -> None:
@@ -100,14 +101,16 @@ def main(argv: list[str] | None = None) -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     ports_path = state_dir / "etr290_ports.json"
     snapshot_path = state_dir / "etr290.json"
+    analyze_path = state_dir / "analyze.json"
     stop_path = state_dir / "etr290_stop"
+    reset_path = state_dir / "etr290_reset"
 
     if shutil.which("tsp") is None:
-        _write_json(
+        write_json_atomic(
             snapshot_path,
             {"available": False, "reason": "tsp not installed", "updated_at": time.time()},
         )
-        _write_json(ports_path, {"udp_port": udp_port, "http_port": 0, "ready": False})
+        write_json_atomic(ports_path, {"udp_port": udp_port, "http_port": 0, "ready": False})
         return 1
 
     from ingest_farm.config import get_settings
@@ -132,12 +135,17 @@ def main(argv: list[str] | None = None) -> int:
     http_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     http_thread.start()
 
-    _write_json(
+    write_json_atomic(
         ports_path,
         {"udp_port": udp_port, "http_port": http_port, "ready": True, "interval_sec": interval},
     )
 
-    tsp_cmd = tsp_command(udp_port=udp_port, http_port=http_port, interval_sec=interval)
+    tsp_cmd = tsp_command(
+        udp_port=udp_port,
+        http_port=http_port,
+        interval_sec=interval,
+        analyze_path=analyze_path,
+    )
     proc = subprocess.Popen(
         tsp_cmd,
         stdout=subprocess.DEVNULL,
@@ -156,16 +164,28 @@ def main(argv: list[str] | None = None) -> int:
             rc = proc.poll()
             if rc is not None:
                 reason = _tsp_failure_reason(rc, stderr_buf)
-                _write_json(
+                write_json_atomic(
                     snapshot_path,
                     {"available": False, "reason": reason, "updated_at": time.time()},
                 )
                 print(reason, flush=True)
                 exit_code = 1
                 break
+            if reset_path.exists():
+                with snap_lock:
+                    structure = snapshot.get("structure")
+                    snapshot.clear()
+                    snapshot.update(empty_etr290_session(interval_sec=interval))
+                    if isinstance(structure, dict):
+                        snapshot["structure"] = structure
+                    write_json_atomic(snapshot_path, dict(snapshot))
+                reset_path.unlink(missing_ok=True)
+            structure = load_pid_structure(analyze_path)
             with snap_lock:
+                if structure is not None:
+                    snapshot["structure"] = structure
                 if snapshot.get("available"):
-                    _write_json(snapshot_path, dict(snapshot))
+                    write_json_atomic(snapshot_path, dict(snapshot))
             time.sleep(0.25)
     finally:
         if proc.poll() is None:
@@ -176,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
                 proc.kill()
         httpd.shutdown()
         stop_path.unlink(missing_ok=True)
+        reset_path.unlink(missing_ok=True)
+        analyze_path.unlink(missing_ok=True)
         ports_path.unlink(missing_ok=True)
 
     return exit_code

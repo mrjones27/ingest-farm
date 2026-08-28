@@ -182,7 +182,7 @@ export function ChannelsPage() {
                   <LiveThumb
                     url={channel.urls?.thumbnail}
                     alt={`${channel.name} preview`}
-                    className="h-14 w-24 rounded"
+                    className="h-14 w-24 rounded object-cover"
                   />
                 </td>
                 <td className="px-4 py-3">

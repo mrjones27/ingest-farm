@@ -12,9 +12,11 @@ Ingest pipelines are composed from three swappable stages:
 
 Channel config selects a **pipeline profile**:
 
-| Profile | Behavior |
-|---------|----------|
+
+| Profile          | Behavior                                     |
+| ---------------- | -------------------------------------------- |
 | `ts_passthrough` | Raw MPEG-TS capture — no demux, no re-encode |
+
 
 `transcode_remux` is not supported yet and is rejected by the API.
 
@@ -23,6 +25,8 @@ Encoders register via `EncoderRegistry`.
 **Deployment note:** the control plane is validated for a **single ingest worker**. Multi-worker farm routing is future work.
 
 ## Prerequisites
+
+
 
 ### Linux (recommended)
 
@@ -33,6 +37,8 @@ sudo apt install \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-ugly gstreamer1.0-libav
 ```
+
+
 
 ### Windows dev
 
@@ -92,6 +98,8 @@ python scripts/run_postprocess.py  # needs GStreamer for proxy/thumbnail
 cd web && npm install && npm run dev
 ```
 
+
+
 ## Create a channel and start recording
 
 ```bash
@@ -140,6 +148,8 @@ curl -X POST http://localhost:8080/api/channels/{id}/record/stop
 curl -X POST http://localhost:8080/api/channels/{id}/disconnect
 ```
 
+
+
 ### SRT listener (farm listens, OBS/ffmpeg calls in)
 
 Publish the listen port on the worker (see `docker-compose.yml`, e.g. `5001:5001/udp`). Channel URI example:
@@ -158,7 +168,7 @@ SRT **caller** mode (farm dials out to an OBS/ffmpeg listener) still uses the in
 
 ### ETR 290 transport-stream health (SRT)
 
-After SRT is connected **and** MPEG-TS is flowing, the SRT child process taps the live tee into a localhost UDP feed for [TSDuck](https://tsduck.io/) `tsp -I ip <port> -P influx --tr-101-290`. `tsp` is started only once the pad probe reports receiving, and stopped on disconnect. Counters are published on the channel page under **ETR 290 (transport stream)** via the existing Redis stats path (`stats.etr290`). Stale snapshots (older than a few report intervals) are not shown as current.
+After SRT is connected **and** MPEG-TS is flowing, the SRT child process taps the live tee into a localhost UDP feed for [TSDuck](https://tsduck.io/) `tsp -I ip <port> -P analyze --json -P influx --tr-101-290`. `tsp` is started only once the pad probe reports receiving, and stopped on disconnect. Counters and the MPEG-TS PID map are published on the channel page under **ETR 290 (transport stream)** via the existing Redis stats path (`stats.etr290`). P1/P2 values and TSDuck `error_count` are **session totals** since connect or the last Reset; packet count, bitrate and the PID map are from TSDuck's last analysis interval (the PID map is cumulative for the session). Stale snapshots (older than a few report intervals) are not shown as current.
 
 This is **not** SRT socket health — a connected SRT session can still carry invalid TS. Priority 1 and 2 logical errors are shown (PCR repetition included). Contribution encoders often trip PCR repetition even when the stream is usable for ingest. The monitor branch uses its own leaky queue; if that queue overruns, the UI reports tap drops so local loss is not mistaken for a source continuity error.
 
@@ -187,6 +197,8 @@ scripts/
   capture_test.py           # Pipeline-only smoke test
   control_plane_test.py     # API → worker → asset E2E test
 ```
+
+
 
 ## Roadmap
 

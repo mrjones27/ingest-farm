@@ -132,6 +132,41 @@ def test_connect_and_record_endpoints(client: TestClient, monkeypatch: pytest.Mo
     ]
 
 
+def test_etr290_reset_endpoint_does_not_change_status(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ingest_farm.api import main as api_main
+    from ingest_farm.models import Channel
+
+    created = client.post(
+        "/api/channels",
+        json={
+            "name": "etr-reset",
+            "source": {"protocol": "srt", "uri": "srt://0.0.0.0:9200?mode=listener"},
+            "pipeline": {"profile": "ts_passthrough", "segment_duration_sec": 3600},
+        },
+    )
+    channel_id = created.json()["id"]
+
+    def _connect(db, channel_id: str) -> None:  # noqa: ANN001
+        ch = db.get(Channel, channel_id)
+        ch.status = "connected"
+        db.commit()
+
+    def _reset(db, channel_id: str) -> None:  # noqa: ANN001
+        calls.append(channel_id)
+
+    calls: list[str] = []
+    monkeypatch.setattr(api_main.scheduler, "connect_channel", _connect)
+    monkeypatch.setattr(api_main.scheduler, "reset_etr290", _reset)
+    client.post(f"/api/channels/{channel_id}/connect")
+
+    resp = client.post(f"/api/channels/{channel_id}/etr290/reset")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "connected"
+    assert calls == [channel_id]
+
+
 def test_channel_thumbnail_requires_live(
     client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -166,6 +201,14 @@ def test_channel_thumbnail_requires_live(
     resp = client.get(f"/api/channels/{channel_id}/thumbnail")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("image/jpeg")
+
+    stale = tmp_path / channel_id / "live" / "thumb.jpg"
+    stale.write_bytes(b"\xff\xd8" + b"J" * 200)
+    ok = tmp_path / channel_id / "live" / "thumb.ok.jpg"
+    ok.write_bytes(b"\xff\xd8" + b"K" * 200)
+    resp = client.get(f"/api/channels/{channel_id}/thumbnail")
+    assert resp.status_code == 200
+    assert resp.content == ok.read_bytes()
 
 
 def test_unqueueable_request_is_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

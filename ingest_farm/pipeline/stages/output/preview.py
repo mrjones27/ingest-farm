@@ -38,6 +38,7 @@ def _drop_non_keyframes(gst: Any):
 
 
 def write_thumbs(thumb_path: Path, data: bytes) -> None:
+    """Publish JPEG bytes via atomic replace so readers never see a truncated file."""
     tmp = thumb_path.with_name("thumb.tmp.jpg")
     stable = thumb_path.with_name("thumb.ok.jpg")
     tmp.write_bytes(data)
@@ -45,10 +46,15 @@ def write_thumbs(thumb_path: Path, data: bytes) -> None:
         tmp.replace(stable)
     except OSError:
         stable.write_bytes(data)
+    pub_tmp = thumb_path.with_name("thumb.jpg.tmp")
     try:
-        thumb_path.write_bytes(data)
+        pub_tmp.write_bytes(data)
+        pub_tmp.replace(thumb_path)
     except OSError:
-        pass
+        try:
+            thumb_path.write_bytes(data)
+        except OSError:
+            pass
 
 
 def attach_jpeg_preview_branch(

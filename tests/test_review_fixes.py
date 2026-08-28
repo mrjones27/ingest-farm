@@ -54,10 +54,14 @@ def test_write_thumbs_atomic(tmp_path: Path) -> None:
     from ingest_farm.pipeline.stages.output.preview import write_thumbs
 
     dest = tmp_path / "thumb.jpg"
-    write_thumbs(dest, b"\xff\xd8" + b"\x00" * 120 + b"\xff\xd9")
+    payload = b"\xff\xd8" + b"\x00" * 120 + b"\xff\xd9"
+    write_thumbs(dest, payload)
     assert dest.is_file()
     assert dest.stat().st_size >= 100
-    assert (tmp_path / "thumb.ok.jpg").is_file()
+    stable = tmp_path / "thumb.ok.jpg"
+    assert stable.is_file()
+    assert dest.read_bytes() == payload
+    assert stable.read_bytes() == payload
 
 
 def test_pipeline_rejects_transcode_remux() -> None:

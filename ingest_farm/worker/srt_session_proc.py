@@ -119,6 +119,7 @@ def _etr290_status_payload(
     *,
     live: bool,
     tap_drops: int,
+    last: dict | None = None,
 ) -> dict | None:
     """Publish a fresh ETR 290 snapshot, or an explicit unavailable reason."""
     from ingest_farm.worker.etr290 import snapshot_is_fresh
@@ -135,6 +136,12 @@ def _etr290_status_payload(
     if not live:
         return None
     if data is None:
+        if last and snapshot_is_fresh(last):
+            out = dict(last)
+            out["tap_drops"] = tap_drops
+            return out
+        if last and last.get("available"):
+            return {"available": False, "reason": "stale", "tap_drops": tap_drops}
         return None
     out = dict(data)
     out["tap_drops"] = tap_drops
@@ -220,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from ingest_farm.config import get_settings
     from ingest_farm.pipeline.stages.output.preview import attach_jpeg_preview_branch, relink_valve
+    from ingest_farm.worker.etr290 import write_json_atomic
 
     settings = get_settings()
 
@@ -420,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
 
     loop = GLib.MainLoop()
     recording = False
+    etr290_last: dict = {}
 
     def _write_status() -> None:
         nonlocal etr290_proc, etr290_hold
@@ -453,14 +462,16 @@ def main(argv: list[str] | None = None) -> int:
             if etr290_proc is not None:
                 print("srt-child ETR290 tsp sidecar started", flush=True)
         etr290 = _etr290_status_payload(
-            state_dir, live=live, tap_drops=int(etr290_drops.get("n", 0))
+            state_dir,
+            live=live,
+            tap_drops=int(etr290_drops.get("n", 0)),
+            last=etr290_last.get("snap"),
         )
         if etr290 is not None:
             payload["etr290"] = etr290
-        try:
-            status_path.write_text(json.dumps(payload), encoding="utf-8")
-        except OSError:
-            pass
+            if etr290.get("available"):
+                etr290_last["snap"] = dict(etr290)
+        write_json_atomic(status_path, payload)
 
     def _start_record(output_dir: Path) -> None:
         nonlocal recording
@@ -517,6 +528,13 @@ def main(argv: list[str] | None = None) -> int:
                 _start_record(Path(parts[1]))
             elif op == "stop":
                 _stop_record()
+            elif op == "etr290_reset":
+                etr290_drops["n"] = 0
+                etr290_last.clear()
+                try:
+                    (state_dir / "etr290_reset").write_text("reset", encoding="utf-8")
+                except OSError:
+                    pass
         return True
 
     def _poll_cmd() -> bool:
@@ -533,13 +551,10 @@ def main(argv: list[str] | None = None) -> int:
         etr290_hold = None
     _stop_etr290_sidecar(state_dir, etr290_proc)
     ready_path.unlink(missing_ok=True)
-    try:
-        status_path.write_text(
-            json.dumps({"alive": False, "available": False, "preview": preview_mode}),
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
+    write_json_atomic(
+        status_path,
+        {"alive": False, "available": False, "preview": preview_mode},
+    )
     return 0
 
 

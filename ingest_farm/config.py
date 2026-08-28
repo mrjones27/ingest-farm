@@ -73,10 +73,10 @@ class Settings(BaseSettings):
     gst_tsparse_alignment: int = 7  # 7 = 188-byte packets
 
     # --- Live JPEG preview ---
-    gst_thumb_width: int = 640
-    gst_thumb_height: int = 360
-    gst_thumb_jpeg_quality: int = 85
-    gst_thumb_interval_sec: float = 1.0
+    gst_thumb_width: int = 320
+    gst_thumb_height: int = 180
+    gst_thumb_jpeg_quality: int = 50
+    gst_thumb_interval_sec: float = 2.0
     gst_thumb_idr_only: bool = True
     gst_parse_config_interval: int = -1  # -1 = SPS/PPS before every IDR
 

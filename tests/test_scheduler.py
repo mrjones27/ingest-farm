@@ -77,3 +77,26 @@ def test_stop_publish_failure_leaves_channel_recording(db_session, monkeypatch) 
         Scheduler().stop_recording(db_session, channel_id)
 
     assert db_session.get(Channel, channel_id).status == "recording"
+
+
+def test_etr290_reset_does_not_change_status(db_session, monkeypatch) -> None:
+    published: list[tuple[str, dict]] = []
+
+    def _publish(queue: str, payload: dict) -> None:
+        published.append((queue, payload))
+
+    channel = Channel(
+        id=new_id(),
+        name="srt-reset",
+        protocol="srt",
+        source_uri="srt://0.0.0.0:9000?mode=listener",
+        status="connected",
+    )
+    db_session.add(channel)
+    db_session.commit()
+    monkeypatch.setattr("ingest_farm.orchestrator.scheduler.publish_event", _publish)
+
+    Scheduler().reset_etr290(db_session, channel.id)
+
+    assert db_session.get(Channel, channel.id).status == "connected"
+    assert published == [("ingest:jobs:etr290_reset", {"channel_id": channel.id})]

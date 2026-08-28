@@ -133,6 +133,10 @@ export function stopChannel(id: string): Promise<Channel> {
   return request<Channel>(`/api/channels/${id}/stop`, { method: "POST" });
 }
 
+export function resetEtr290(id: string): Promise<Channel> {
+  return request<Channel>(`/api/channels/${id}/etr290/reset`, { method: "POST" });
+}
+
 export function getChannelStats(id: string): Promise<{
   channel_id: string;
   status: string;

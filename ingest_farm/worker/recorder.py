@@ -348,6 +348,15 @@ class ChannelSession:
             self._preview_mode,
         )
 
+    def reset_etr290(self) -> None:
+        if self._srt_proc is None or self._srt_state_dir is None:
+            logger.info(
+                "Channel %s ETR 290 reset skipped (not an SRT child session)",
+                self._channel_name,
+            )
+            return
+        self._srt_send_cmd("etr290_reset")
+
     def _srt_send_cmd(self, cmd: str) -> None:
         if self._srt_state_dir is None:
             raise RuntimeError("Not connected")

@@ -12,6 +12,7 @@ CHANNEL_CONNECT_QUEUE = "ingest:jobs:connect"
 CHANNEL_DISCONNECT_QUEUE = "ingest:jobs:disconnect"
 CHANNEL_RECORD_START_QUEUE = "ingest:jobs:record_start"
 CHANNEL_RECORD_STOP_QUEUE = "ingest:jobs:record_stop"
+CHANNEL_ETR290_RESET_QUEUE = "ingest:jobs:etr290_reset"
 # Legacy aliases kept for older scripts during transition.
 CHANNEL_START_QUEUE = CHANNEL_RECORD_START_QUEUE
 CHANNEL_STOP_QUEUE = CHANNEL_RECORD_STOP_QUEUE

@@ -384,6 +384,11 @@ def record_stop(channel_id: str, db: Session = Depends(get_db)) -> ChannelRespon
     return _channel_action(db, channel_id, scheduler.stop_recording)
 
 
+@router.post("/channels/{channel_id}/etr290/reset", response_model=ChannelResponse)
+def etr290_reset(channel_id: str, db: Session = Depends(get_db)) -> ChannelResponse:
+    return _channel_action(db, channel_id, scheduler.reset_etr290)
+
+
 @router.get("/channels/{channel_id}/thumbnail")
 def channel_thumbnail(channel_id: str, db: Session = Depends(get_db)) -> FileResponse:
     channel = db.get(Channel, channel_id)
@@ -399,9 +404,9 @@ def channel_thumbnail(channel_id: str, db: Session = Depends(get_db)) -> FileRes
         raise HTTPException(status_code=404, detail="Channel not live")
     path = get_settings().storage_root / channel_id / "live" / "thumb.jpg"
     stable = path.with_name("thumb.ok.jpg")
-    serve = path if path.is_file() and path.stat().st_size >= 100 else None
-    if serve is None and stable.is_file() and stable.stat().st_size >= 100:
-        serve = stable
+    serve = stable if stable.is_file() and stable.stat().st_size >= 100 else None
+    if serve is None and path.is_file() and path.stat().st_size >= 100:
+        serve = path
     if serve is None:
         raise HTTPException(status_code=404, detail="Thumbnail not ready")
     return FileResponse(
