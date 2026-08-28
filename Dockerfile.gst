@@ -1,10 +1,15 @@
 FROM ubuntu:24.04
 
+ARG TSDUCK_VERSION=3.44-4676
+ARG TSDUCK_DEB=tsduck_${TSDUCK_VERSION}.ubuntu24_amd64.deb
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
     python3 \
     python3-pip \
     python3-venv \
@@ -18,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
+    && wget -q "https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/${TSDUCK_DEB}" \
+    && apt-get install -y "./${TSDUCK_DEB}" \
+    && rm "./${TSDUCK_DEB}" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

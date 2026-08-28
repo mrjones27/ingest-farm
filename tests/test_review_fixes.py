@@ -106,6 +106,7 @@ def test_gst_leaky_modes() -> None:
     assert Settings(gst_passthrough_leaky="none").leaky("passthrough") == 0
     assert Settings(gst_passthrough_leaky="downstream").leaky("passthrough") == 2
     assert Settings(gst_preview_leaky="upstream").leaky("preview") == 1
+    assert Settings(etr290_queue_leaky="upstream").leaky("etr290") == 1
 
 
 def test_hls_playlist_vod_finalize() -> None:

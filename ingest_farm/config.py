@@ -2,6 +2,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+QueueKind = Literal["passthrough", "preview", "etr290"]
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _LEAKY_MODES = {
@@ -56,6 +58,16 @@ class Settings(BaseSettings):
     gst_preview_leaky: str = "upstream"
     gst_tee_allow_not_linked: bool = True
 
+    # --- ETR 290 (TSDuck tsp sidecar on SRT live sessions) ---
+    etr290_enabled: bool = True
+    etr290_interval_sec: int = 2
+    # Monitor branch must leak so tsp cannot back-pressure ingest, but it needs
+    # enough slack that leaky drops do not invent Priority 1 CC errors.
+    etr290_queue_ms: int = 2000
+    etr290_queue_bytes: int = 8_388_608  # 8 MiB
+    etr290_queue_buffers: int = 0  # 0 = disabled; time/bytes decide
+    etr290_queue_leaky: str = "upstream"
+
     # --- MPEG-TS capture ---
     gst_tsparse_set_timestamps: bool = True
     gst_tsparse_alignment: int = 7  # 7 = 188-byte packets
@@ -89,22 +101,33 @@ class Settings(BaseSettings):
 
         return socket.gethostname()
 
-    def leaky(self, kind: Literal["passthrough", "preview"] = "passthrough") -> int:
-        raw = self.gst_passthrough_leaky if kind == "passthrough" else self.gst_preview_leaky
+    def leaky(self, kind: QueueKind = "passthrough") -> int:
+        raw = {
+            "passthrough": self.gst_passthrough_leaky,
+            "preview": self.gst_preview_leaky,
+            "etr290": self.etr290_queue_leaky,
+        }[kind]
         fallback = 0 if kind == "passthrough" else 1
         return _LEAKY_MODES.get(raw.strip().lower(), fallback)
 
-    def queue_time_ns(self, kind: Literal["passthrough", "preview"] = "passthrough") -> int:
-        ms = self.gst_passthrough_queue_ms if kind == "passthrough" else self.gst_preview_queue_ms
+    def queue_time_ns(self, kind: QueueKind = "passthrough") -> int:
+        ms = {
+            "passthrough": self.gst_passthrough_queue_ms,
+            "preview": self.gst_preview_queue_ms,
+            "etr290": self.etr290_queue_ms,
+        }[kind]
         return max(0, int(ms)) * 1_000_000
 
-    def configure_queue(self, queue, kind: Literal["passthrough", "preview"] = "passthrough") -> None:
-        """Apply leaky/size policy. Capture never leaks; preview always can."""
+    def configure_queue(self, queue, kind: QueueKind = "passthrough") -> None:
+        """Apply leaky/size policy. Capture never leaks; preview/ETR290 can."""
         queue.set_property("leaky", self.leaky(kind))
         queue.set_property("max-size-time", self.queue_time_ns(kind))
         if kind == "passthrough":
             queue.set_property("max-size-bytes", int(self.gst_passthrough_queue_bytes))
             queue.set_property("max-size-buffers", int(self.gst_passthrough_queue_buffers))
+        elif kind == "etr290":
+            queue.set_property("max-size-bytes", int(self.etr290_queue_bytes))
+            queue.set_property("max-size-buffers", int(self.etr290_queue_buffers))
         else:
             queue.set_property("max-size-bytes", int(self.gst_preview_queue_bytes))
             queue.set_property("max-size-buffers", int(self.gst_preview_queue_buffers))

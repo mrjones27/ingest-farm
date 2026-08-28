@@ -156,6 +156,14 @@ Do not call `srtsrc.get_property("stats")` or `bus.add_signal_watch()` on the li
 
 SRT **caller** mode (farm dials out to an OBS/ffmpeg listener) still uses the in-process live session and remains the simpler fallback if needed.
 
+### ETR 290 transport-stream health (SRT)
+
+After SRT is connected **and** MPEG-TS is flowing, the SRT child process taps the live tee into a localhost UDP feed for [TSDuck](https://tsduck.io/) `tsp -I ip <port> -P influx --tr-101-290`. `tsp` is started only once the pad probe reports receiving, and stopped on disconnect. Counters are published on the channel page under **ETR 290 (transport stream)** via the existing Redis stats path (`stats.etr290`). Stale snapshots (older than a few report intervals) are not shown as current.
+
+This is **not** SRT socket health — a connected SRT session can still carry invalid TS. Priority 1 and 2 logical errors are shown (PCR repetition included). Contribution encoders often trip PCR repetition even when the stream is usable for ingest. The monitor branch uses its own leaky queue; if that queue overruns, the UI reports tap drops so local loss is not mistaken for a source continuity error.
+
+Disable with `ETR290_ENABLED=false` or set `ETR290_INTERVAL_SEC` (default 2). Requires `tsp` in the worker image (`Dockerfile.gst` pins the TSDuck `.deb`).
+
 ## Project layout
 
 ```
@@ -170,6 +178,7 @@ ingest_farm/
       registry.py           # Swappable encoder plugins
   worker/                   # GStreamer recorder (+ SRT child session)
     srt_session_proc.py     # Isolated SRT listener process
+    etr290_sidecar.py       # TSDuck tsp TR 101 290 monitor sidecar
   orchestrator/             # Redis job scheduler
   postprocess/              # HLS proxy + thumbnail + catalog
   api/                      # FastAPI control plane + media serving + SPA

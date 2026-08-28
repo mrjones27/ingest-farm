@@ -14,6 +14,7 @@ import {
 } from "../api/client";
 import { ChannelFormModal } from "../components/ChannelFormModal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Etr290Panel } from "../components/Etr290Panel";
 import { LiveThumb } from "../components/LiveThumb";
 import { SrtStatsPanel } from "../components/SrtStatsPanel";
 import { StatusBadge } from "../components/StatusBadge";
@@ -191,6 +192,18 @@ export function ChannelDetailPage() {
             SRT stats
           </h2>
           <SrtStatsPanel stats={channel.stats} />
+        </section>
+      )}
+
+      {channel.source.protocol === "srt" && live && (
+        <section className="panel p-4">
+          <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-slate-400">
+            ETR 290 (transport stream)
+          </h2>
+          <Etr290Panel
+            receiving={Boolean(channel.stats?.receiving)}
+            stats={channel.stats}
+          />
         </section>
       )}
 

@@ -6,6 +6,9 @@ Run srtsrc in a child process and control record via a state directory.
 from __future__ import annotations
 
 import json
+import shutil
+import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -33,6 +36,111 @@ def _configure_record_sink(record_sink, segment_duration_sec: int, placeholder: 
         record_sink.set_property("sync", False)
     if record_sink.find_property("async"):
         record_sink.set_property("async", False)
+
+
+def _hold_udp_port() -> tuple[socket.socket, int]:
+    """Bind a localhost UDP port and keep it until tsp is ready to take it."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    return sock, int(sock.getsockname()[1])
+
+
+def _attach_etr290_monitor(pipeline, tee, udp_port: int, drops: dict) -> None:
+    """Leaky tee branch → localhost UDP for TSDuck tsp (must not back-pressure ingest)."""
+    from gi.repository import Gst
+
+    from ingest_farm.config import get_settings
+
+    settings = get_settings()
+    mon_queue = Gst.ElementFactory.make("queue", "etr290-q")
+    udpsink = Gst.ElementFactory.make("udpsink", "etr290-udp")
+    if not all([mon_queue, udpsink]):
+        raise RuntimeError("ETR290 monitor elements unavailable")
+    settings.configure_queue(mon_queue, "etr290")
+    udpsink.set_property("host", "127.0.0.1")
+    udpsink.set_property("port", int(udp_port))
+    udpsink.set_property("sync", False)
+    if udpsink.find_property("async"):
+        udpsink.set_property("async", False)
+    pipeline.add(mon_queue)
+    pipeline.add(udpsink)
+    tee_mon = tee.get_request_pad("src_%u")
+    mon_pad = mon_queue.get_static_pad("sink")
+    if tee_mon is None or mon_pad is None or tee_mon.link(mon_pad) != Gst.PadLinkReturn.OK:
+        raise RuntimeError("Failed to link tee → ETR290 monitor queue")
+    if not mon_queue.link(udpsink):
+        raise RuntimeError("Failed to link ETR290 monitor queue → udpsink")
+
+    def _on_overrun(_queue) -> None:
+        drops["n"] = int(drops.get("n", 0)) + 1
+
+    try:
+        mon_queue.connect("overrun", _on_overrun)
+    except TypeError:
+        pass
+
+
+def _start_etr290_sidecar(state_dir: Path, udp_port: int) -> subprocess.Popen[str] | None:
+    from ingest_farm.config import get_settings
+
+    if not get_settings().etr290_enabled or shutil.which("tsp") is None:
+        return None
+    stop_path = state_dir / "etr290_stop"
+    stop_path.unlink(missing_ok=True)
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "ingest_farm.worker.etr290_sidecar",
+            str(state_dir),
+            str(int(udp_port)),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _stop_etr290_sidecar(state_dir: Path, proc: subprocess.Popen[str] | None) -> None:
+    if proc is None:
+        return
+    stop_path = state_dir / "etr290_stop"
+    try:
+        stop_path.write_text("stop", encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _etr290_status_payload(
+    state_dir: Path,
+    *,
+    live: bool,
+    tap_drops: int,
+) -> dict | None:
+    """Publish a fresh ETR 290 snapshot, or an explicit unavailable reason."""
+    from ingest_farm.worker.etr290 import snapshot_is_fresh
+
+    etr290_path = state_dir / "etr290.json"
+    data: dict | None = None
+    if etr290_path.is_file():
+        try:
+            loaded = json.loads(etr290_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        if isinstance(loaded, dict):
+            data = loaded
+    if not live:
+        return None
+    if data is None:
+        return None
+    out = dict(data)
+    out["tap_drops"] = tap_drops
+    if data.get("available") is True and not snapshot_is_fresh(data):
+        return {"available": False, "reason": "stale", "tap_drops": tap_drops}
+    return out
 
 
 def _attach_fakesink_preview(pipeline, tee) -> None:
@@ -185,6 +293,41 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("srt-child preview jpeg (IDR) attached", flush=True)
 
+    etr290_hold: socket.socket | None = None
+    etr290_udp_port: int | None = None
+    etr290_proc: subprocess.Popen[str] | None = None
+    etr290_drops = {"n": 0}
+    if settings.etr290_enabled:
+        if shutil.which("tsp") is None:
+            try:
+                (state_dir / "etr290.json").write_text(
+                    json.dumps(
+                        {
+                            "available": False,
+                            "reason": "tsp not installed",
+                            "updated_at": time.time(),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            print("srt-child ETR290 skipped: tsp not installed", flush=True)
+        else:
+            try:
+                etr290_hold, etr290_udp_port = _hold_udp_port()
+                _attach_etr290_monitor(pipeline, tee, etr290_udp_port, etr290_drops)
+                print(
+                    f"srt-child ETR290 monitor → udp://127.0.0.1:{etr290_udp_port} (tsp starts when TS flows)",
+                    flush=True,
+                )
+            except (OSError, RuntimeError) as exc:
+                print(f"srt-child ETR290 monitor skipped: {exc}", flush=True)
+                if etr290_hold is not None:
+                    etr290_hold.close()
+                    etr290_hold = None
+                etr290_udp_port = None
+
     record_sink = Gst.ElementFactory.make("multifilesink", "ts-capture")
     if record_sink is None:
         print("multifilesink unavailable", file=sys.stderr)
@@ -279,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     recording = False
 
     def _write_status() -> None:
+        nonlocal etr290_proc, etr290_hold
         live = has_data and (time.monotonic() - last_buf_at["t"]) < _RECEIVING_IDLE_SEC
         payload: dict = {
             "available": True,
@@ -301,6 +445,18 @@ def main(argv: list[str] | None = None) -> int:
         # moment it drops, so the pad probe stays authoritative for the session.
         payload["bytes-received-total"] = bytes_total
         payload["receive-rate-mbps"] = round(rate_window["mbps"], 3) if live else 0.0
+        if live and etr290_proc is None and etr290_udp_port is not None:
+            if etr290_hold is not None:
+                etr290_hold.close()
+                etr290_hold = None
+            etr290_proc = _start_etr290_sidecar(state_dir, etr290_udp_port)
+            if etr290_proc is not None:
+                print("srt-child ETR290 tsp sidecar started", flush=True)
+        etr290 = _etr290_status_payload(
+            state_dir, live=live, tap_drops=int(etr290_drops.get("n", 0))
+        )
+        if etr290 is not None:
+            payload["etr290"] = etr290
         try:
             status_path.write_text(json.dumps(payload), encoding="utf-8")
         except OSError:
@@ -331,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
         print("record stop", flush=True)
 
     def _drain_cmds() -> bool:
+        nonlocal etr290_hold
         if not cmds_path.exists():
             return True
         try:
@@ -349,6 +506,10 @@ def main(argv: list[str] | None = None) -> int:
             if op == "quit":
                 if recording:
                     _stop_record()
+                if etr290_hold is not None:
+                    etr290_hold.close()
+                    etr290_hold = None
+                _stop_etr290_sidecar(state_dir, etr290_proc)
                 pipeline.set_state(Gst.State.NULL)
                 loop.quit()
                 return False
@@ -367,6 +528,10 @@ def main(argv: list[str] | None = None) -> int:
     _write_status()
     print("srt-child ready", flush=True)
     loop.run()
+    if etr290_hold is not None:
+        etr290_hold.close()
+        etr290_hold = None
+    _stop_etr290_sidecar(state_dir, etr290_proc)
     ready_path.unlink(missing_ok=True)
     try:
         status_path.write_text(
