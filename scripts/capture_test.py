@@ -18,6 +18,16 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("capture_test")
 
+_REPO_SAMPLE = Path(__file__).resolve().parents[1] / "test-content" / "mpegts" / "sample.ts"
+_DOCKER_SAMPLE = Path("/test-content/mpegts/sample.ts")
+
+
+def _default_sample() -> Path:
+    """Prefer the Compose mount; fall back to the repo path on the host."""
+    if _DOCKER_SAMPLE.parent.is_dir():
+        return _DOCKER_SAMPLE
+    return _REPO_SAMPLE
+
 
 def require_gstreamer() -> None:
     from ingest_farm.common.gst_utils import init_gstreamer
@@ -190,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="MPEG-TS passthrough capture smoke test")
     parser.add_argument("--mode", choices=("file", "udp"), default="file")
     parser.add_argument("--output", type=Path, default=Path("/data/capture-test"))
-    parser.add_argument("--sample", type=Path, default=Path("/data/fixtures/sample.ts"))
+    parser.add_argument("--sample", type=Path, default=_default_sample())
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--duration", type=int, default=8, help="UDP send duration seconds")
     parser.add_argument("--segment-sec", type=int, default=3600)

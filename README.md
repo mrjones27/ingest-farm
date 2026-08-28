@@ -77,7 +77,8 @@ docker compose --profile gst run --rm gst python scripts/capture_test.py --mode 
 docker compose --profile gst run --rm gst python scripts/capture_test.py --mode udp --duration 8
 ```
 
-Segments land under `data/capture-test/{file,udp}/`.
+Segments land under `data/capture-test/{file,udp}/`. File-mode input is
+`test-content/mpegts/sample.ts` (generated on first run if missing).
 
 ## Local Python (optional)
 
@@ -196,6 +197,7 @@ web/                        # Vite + React ops console
 scripts/
   capture_test.py           # Pipeline-only smoke test
   control_plane_test.py     # API → worker → asset E2E test
+test-content/               # Known-good media for workflow validation
 ```
 
 

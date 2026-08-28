@@ -65,6 +65,7 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data
+      - ./test-content:/test-content
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
@@ -108,6 +109,7 @@ services:
       - "5001:5001/udp"
     volumes:
       - ./data:/data
+      - ./test-content:/test-content
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
@@ -132,6 +134,7 @@ services:
       <<: *app-env
     volumes:
       - ./data:/data
+      - ./test-content:/test-content
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
@@ -157,6 +160,7 @@ services:
       <<: *app-env
     volumes:
       - ./data:/data
+      - ./test-content:/test-content
       - ./ingest_farm:/app/ingest_farm
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic

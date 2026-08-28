@@ -6,6 +6,15 @@ venv/
 .env
 data/
 *.mkv
+
+# Test media stays local — clips can be multi-GB
+test-content/**/*.ts
+test-content/**/*.m2ts
+test-content/**/*.mpg
+test-content/**/*.mpeg
+test-content/**/*.mxf
+test-content/**/*.mp4
+test-content/**/*.mov
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
